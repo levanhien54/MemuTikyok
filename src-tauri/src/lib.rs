@@ -5,6 +5,8 @@ mod adb;
 mod commands;
 mod crypto;
 mod db;
+#[cfg(test)]
+mod e2e_real;
 mod error;
 mod fingerprint;
 mod geo;

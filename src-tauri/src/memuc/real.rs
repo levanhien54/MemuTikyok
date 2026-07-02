@@ -17,7 +17,13 @@ use super::MemucClient;
 use crate::error::{AppError, AppResult};
 use crate::model::Instance;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Timeout cho lệnh nhanh (query/config): listvms, setconfigex, rename…
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
+/// Timeout cho lệnh VÒNG ĐỜI VM (create/clone/start/stop/reboot/remove) — các thao
+/// tác này nạp/tắt máy ảo, có thể vượt xa 15s khi host tải nặng (nhiều VM chạy) →
+/// dùng ngưỡng rộng để tránh Timeout GIẢ làm hỏng luồng khởi chạy. (Phát hiện qua
+/// test thực: provision bị Timeout(15) khi start VM lúc host đang chạy VM khác.)
+const LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct RealMemuc {
     memuc_path: PathBuf,
@@ -52,8 +58,13 @@ impl RealMemuc {
         None
     }
 
-    /// Chạy memuc với danh sách đối số (không qua shell) + timeout.
+    /// Chạy memuc với danh sách đối số (không qua shell), dùng timeout mặc định.
     async fn run(&self, args: &[&str]) -> AppResult<String> {
+        self.run_to(args, self.timeout).await
+    }
+
+    /// Như `run` nhưng cho phép chỉ định timeout (lệnh vòng đời VM cần ngưỡng rộng hơn).
+    async fn run_to(&self, args: &[&str], dur: Duration) -> AppResult<String> {
         let mut cmd = Command::new(&self.memuc_path);
         cmd.args(args);
         // Ẩn cửa sổ console con trên Windows (tokio::process::Command có sẵn creation_flags).
@@ -63,9 +74,9 @@ impl RealMemuc {
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
 
-        let output = timeout(self.timeout, cmd.output())
+        let output = timeout(dur, cmd.output())
             .await
-            .map_err(|_| AppError::Timeout(self.timeout.as_secs()))??;
+            .map_err(|_| AppError::Timeout(dur.as_secs()))??;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -107,35 +118,35 @@ impl MemucClient for RealMemuc {
     }
 
     async fn start(&self, index: u32) -> AppResult<()> {
-        self.run(&["start", "-i", &index.to_string()])
+        self.run_to(&["start", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
             .await
             .map(|_| ())
     }
 
     async fn stop(&self, index: u32) -> AppResult<()> {
-        self.run(&["stop", "-i", &index.to_string()])
+        self.run_to(&["stop", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
             .await
             .map(|_| ())
     }
 
     async fn reboot(&self, index: u32) -> AppResult<()> {
-        self.run(&["reboot", "-i", &index.to_string()])
+        self.run_to(&["reboot", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
             .await
             .map(|_| ())
     }
 
     async fn create(&self) -> AppResult<()> {
-        self.run(&["create"]).await.map(|_| ())
+        self.run_to(&["create"], LIFECYCLE_TIMEOUT).await.map(|_| ())
     }
 
     async fn clone_vm(&self, index: u32) -> AppResult<()> {
-        self.run(&["clone", "-i", &index.to_string()])
+        self.run_to(&["clone", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
             .await
             .map(|_| ())
     }
 
     async fn remove(&self, index: u32) -> AppResult<()> {
-        self.run(&["remove", "-i", &index.to_string()])
+        self.run_to(&["remove", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
             .await
             .map(|_| ())
     }

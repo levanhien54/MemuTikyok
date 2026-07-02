@@ -167,9 +167,10 @@ impl AdbWorker for RealAdbWorker {
 
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()> {
         use tokio::time::{sleep, Duration};
-        // Poll tối đa ~90s. `memuc adb` có thể chèn dòng "already connected ..."
+        // Poll tối đa ~180s. Boot có thể vượt 90s khi host tải nặng (nhiều VM chạy) —
+        // phát hiện qua test thực. `memuc adb` có thể chèn dòng "already connected ..."
         // trước giá trị → lấy token cuối cùng để so sánh (bug đã gặp trên MEmu thật).
-        for _ in 0..30 {
+        for _ in 0..60 {
             let out = self
                 .adb(idx, "shell getprop sys.boot_completed")
                 .await
@@ -180,7 +181,7 @@ impl AdbWorker for RealAdbWorker {
             }
             sleep(Duration::from_secs(3)).await;
         }
-        Err(AppError::Timeout(90))
+        Err(AppError::Timeout(180))
     }
 
     async fn start_app(&self, idx: u32, pkg: &str) -> AppResult<()> {
