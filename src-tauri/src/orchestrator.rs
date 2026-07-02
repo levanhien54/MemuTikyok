@@ -3,11 +3,52 @@
 //! và teardown (backup → đồng bộ → HỦY VM). Bất biến an toàn: chỉ hủy VM sau khi
 //! backup + ghi CSDL thành công (R-15).
 
+use std::collections::HashSet;
 use std::fs;
 
 use crate::error::{AppError, AppResult};
 use crate::model::{HardwareProfile, SnapshotMeta, SnapshotRecord, DEFAULT_BLOAT, TIKTOK_PKG};
 use crate::state::{now_ms, SharedState};
+
+/// Tập index VM hiện có (từ memuc).
+async fn index_set(state: &SharedState) -> AppResult<HashSet<u32>> {
+    Ok(state
+        .memuc
+        .list_instances()
+        .await?
+        .into_iter()
+        .map(|i| i.index)
+        .collect())
+}
+
+/// Nhận diện index VM **mới** = index xuất hiện sau khi tạo mà trước đó chưa có.
+/// Đáng tin hơn `max(index)` vì memuc có thể **tái dùng** index đã xóa (lấp khoảng
+/// trống), khiến max() trỏ nhầm sang VM khác.
+async fn identify_new(state: &SharedState, before: &HashSet<u32>) -> AppResult<u32> {
+    index_set(state)
+        .await?
+        .difference(before)
+        .copied()
+        .max()
+        .ok_or_else(|| AppError::CommandFailed("Không xác định được VM vừa tạo".into()))
+}
+
+/// Tạo một VM mới và trả về index của nó (an toàn với tái dùng index + đua tranh).
+/// Giữ `create_lock` suốt tạo→nhận diện để hai lần tạo song song không chọn nhầm.
+pub async fn create_vm(state: &SharedState) -> AppResult<u32> {
+    let _guard = state.create_lock.lock().await;
+    let before = index_set(state).await?;
+    state.queue.run(state.memuc.create()).await?;
+    identify_new(state, &before).await
+}
+
+/// Clone `base_index` và trả về index VM mới (an toàn với tái dùng index + đua tranh).
+pub async fn clone_vm(state: &SharedState, base_index: u32) -> AppResult<u32> {
+    let _guard = state.create_lock.lock().await;
+    let before = index_set(state).await?;
+    state.queue.run(state.memuc.clone_vm(base_index)).await?;
+    identify_new(state, &before).await
+}
 
 /// Gỡ app thừa + ẩn dấu vết ảo MẶC ĐỊNH (best-effort) khi chuẩn bị VM đã boot.
 async fn auto_debloat(state: &SharedState, index: u32) {
@@ -85,16 +126,8 @@ pub async fn provision(
     account_key: &str,
     hw: &HardwareProfile,
 ) -> AppResult<u32> {
-    // 1) Tạo VM mới tinh và xác định index của nó.
-    state.queue.run(state.memuc.create()).await?;
-    let index = state
-        .memuc
-        .list_instances()
-        .await?
-        .iter()
-        .map(|i| i.index)
-        .max()
-        .ok_or_else(|| AppError::CommandFailed("Không xác định được VM vừa tạo".into()))?;
+    // 1) Tạo VM mới tinh và xác định index của nó (an toàn tái dùng index/đua tranh).
+    let index = create_vm(state).await?;
 
     // 2) Áp hồ sơ phần cứng + độ phân giải (nhất quán fingerprint — R-12).
     apply_hw_config(state, index, hw).await?;
@@ -132,15 +165,7 @@ pub async fn clone_from_base(
     account_key: &str,
     hw: &HardwareProfile,
 ) -> AppResult<u32> {
-    state.queue.run(state.memuc.clone_vm(base_index)).await?;
-    let index = state
-        .memuc
-        .list_instances()
-        .await?
-        .iter()
-        .map(|i| i.index)
-        .max()
-        .ok_or_else(|| AppError::CommandFailed("Không xác định VM vừa clone".into()))?;
+    let index = clone_vm(state, base_index).await?;
 
     // Lưu fingerprint cho VM mới (để nạp lại lần sau) + áp ngay (gồm độ phân giải).
     state.set_hardware(index, hw.clone()).await;
@@ -171,15 +196,7 @@ pub async fn clone_from_base(
 /// 0s cold-boot khi cần account mới). Trả về số VM hiện có trong pool.
 pub async fn pool_refill(state: &SharedState, base_index: u32, target: usize) -> AppResult<usize> {
     while state.pool.lock().await.len() < target {
-        state.queue.run(state.memuc.clone_vm(base_index)).await?;
-        let index = state
-            .memuc
-            .list_instances()
-            .await?
-            .iter()
-            .map(|i| i.index)
-            .max()
-            .ok_or_else(|| AppError::CommandFailed("Không xác định VM vừa clone".into()))?;
+        let index = clone_vm(state, base_index).await?;
         state.memuc.set_config(index, "enable_su", "1").await?;
         state.queue.run(state.memuc.start(index)).await?;
         state.adb.wait_boot_completed(index).await?;
@@ -366,7 +383,7 @@ pub async fn swap_account(
 mod tests {
     use super::*;
     use crate::geo::MockGeolocator;
-    use crate::memuc::MockMemuc;
+    use crate::memuc::{MemucClient, MockMemuc};
     use crate::snapshot::LocalSnapshotStore;
     use crate::state::AppState;
     use crate::{adb::MockAdbWorker, db::Db, model::AppSettings};
@@ -420,6 +437,19 @@ mod tests {
             HashMap::new(),
         ));
         (state, memuc, adb)
+    }
+
+    #[tokio::test]
+    async fn create_vm_nhan_dien_dung_khi_tai_dung_index() {
+        // Mock bắt đầu {0,1}. Xóa 0 → còn {1}. Tạo mới → memuc TÁI DÙNG index 0.
+        // Phải nhận diện đúng index mới (0) bằng phép hiệu tập, KHÔNG phải max (1).
+        let (state, memuc, _adb) = make_state("reuse");
+        memuc.remove(0).await.unwrap();
+        let idx = create_vm(&state).await.unwrap();
+        assert_eq!(
+            idx, 0,
+            "phải nhận diện index tái dùng (0), không phải max (1)"
+        );
     }
 
     #[tokio::test]

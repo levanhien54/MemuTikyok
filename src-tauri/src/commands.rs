@@ -42,9 +42,9 @@ pub async fn create_instance(
     payload: CreateInstancePayload,
     state: State<'_, SharedState>,
 ) -> AppResult<()> {
-    state.queue.run(state.memuc.create()).await?;
-    let list = state.memuc.list_instances().await?;
-    if let Some(new_index) = list.iter().map(|i| i.index).max() {
+    // Tạo VM + nhận diện index mới an toàn (tránh tái dùng index/đua tranh).
+    let new_index = orchestrator::create_vm(state.inner()).await?;
+    {
         state.set_account(new_index, payload.account).await;
         if !payload.note.trim().is_empty() {
             state.set_note(new_index, payload.note).await;

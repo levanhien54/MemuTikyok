@@ -41,6 +41,9 @@ pub struct AppState {
     pub db: Option<Db>,
     /// Warm pool: các VM đã clone + boot sẵn, chờ gán tài khoản (0s cold-boot).
     pub pool: Mutex<VecDeque<u32>>,
+    /// Khóa tuần tự hóa thao tác "tạo/clone VM rồi nhận diện index mới" — tránh
+    /// hai lần tạo song song cùng chọn nhầm một index (race + tái dùng index).
+    pub create_lock: Mutex<()>,
 }
 
 impl AppState {
@@ -66,6 +69,7 @@ impl AppState {
             metadata: Mutex::new(metadata),
             db,
             pool: Mutex::new(VecDeque::new()),
+            create_lock: Mutex::new(()),
         }
     }
 

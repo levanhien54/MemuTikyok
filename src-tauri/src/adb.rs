@@ -129,7 +129,8 @@ impl AdbWorker for RealAdbWorker {
 
         self.adb(idx, &format!("shell su -c 'am force-stop {pkg}'"))
             .await?;
-        self.adb(idx, &format!("push {} {remote}", archive.display()))
+        // Bọc nháy đường dẫn cục bộ: thư mục temp/tên user có thể chứa khoảng trắng.
+        self.adb(idx, &format!("push \"{}\" {remote}", archive.display()))
             .await?;
         // Giải nén vào /data/data (tar; nếu là .zst cần giải nén trước — xem runbook §14.2).
         self.adb(

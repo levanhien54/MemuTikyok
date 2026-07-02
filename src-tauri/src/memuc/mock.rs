@@ -1,6 +1,7 @@
 //! Adapter giả lập trong bộ nhớ — dùng cho test và chạy dev khi không có MEmu.
 //! Mô phỏng hành vi bất đồng bộ (§7.2): thao tác đổi trạng thái ngay trong state.
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -8,6 +9,12 @@ use async_trait::async_trait;
 use super::MemucClient;
 use crate::error::{AppError, AppResult};
 use crate::model::{Instance, InstanceStatus};
+
+/// Index rảnh nhỏ nhất (mô phỏng memuc **tái dùng** index đã xóa để lấp khoảng trống).
+fn lowest_free_index(vms: &[Instance]) -> u32 {
+    let used: HashSet<u32> = vms.iter().map(|v| v.index).collect();
+    (0u32..).find(|i| !used.contains(i)).unwrap_or(0)
+}
 
 pub struct MockMemuc {
     state: Mutex<Vec<Instance>>,
@@ -98,7 +105,7 @@ impl MemucClient for MockMemuc {
 
     async fn create(&self) -> AppResult<()> {
         let mut vms = self.state.lock().unwrap();
-        let next = vms.iter().map(|v| v.index).max().map_or(0, |m| m + 1);
+        let next = lowest_free_index(&vms);
         vms.push(Instance {
             index: next,
             title: format!("MEmu_{next}"),
@@ -122,7 +129,7 @@ impl MemucClient for MockMemuc {
             .find(|v| v.index == index)
             .map(|v| v.title.clone())
             .unwrap_or_else(|| "MEmu".to_string());
-        let next = vms.iter().map(|v| v.index).max().map_or(0, |m| m + 1);
+        let next = lowest_free_index(&vms);
         vms.push(Instance {
             index: next,
             title: format!("{src_title}_clone"),
