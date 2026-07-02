@@ -338,6 +338,7 @@ impl AdbWorker for RealAdbWorker {
 pub struct MockAdbWorker {
     devices: Mutex<HashMap<u32, Vec<u8>>>,
     android_ids: Mutex<HashMap<u32, String>>,
+    boot_waits: std::sync::atomic::AtomicUsize,
 }
 
 impl MockAdbWorker {
@@ -345,7 +346,14 @@ impl MockAdbWorker {
         Self {
             devices: Mutex::new(HashMap::new()),
             android_ids: Mutex::new(HashMap::new()),
+            boot_waits: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Số lần `wait_boot_completed` được gọi (kiểm luồng khởi chạy luôn chờ boot).
+    #[cfg(test)]
+    pub fn boot_wait_count(&self) -> usize {
+        self.boot_waits.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Set dữ liệu app cho một VM (dùng trong test/dev).
@@ -414,6 +422,8 @@ impl AdbWorker for MockAdbWorker {
     }
 
     async fn wait_boot_completed(&self, _idx: u32) -> AppResult<()> {
+        self.boot_waits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 

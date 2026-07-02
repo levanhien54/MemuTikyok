@@ -294,8 +294,11 @@ pub async fn launch_instance(
     state.queue.run(state.memuc.start(index)).await?;
     state.mark_launched(index).await;
 
+    // LUÔN chờ Android boot xong trước mọi lệnh adb (restore/start_app) — kể cả khi
+    // không có fingerprint — nếu không adb sẽ chạy lúc thiết bị chưa sẵn sàng.
+    state.adb.wait_boot_completed(index).await?;
+
     if let Some(hw) = &hw {
-        state.adb.wait_boot_completed(index).await?;
         state.adb.apply_android_id(index, &hw.android_id).await?;
     }
 
@@ -449,6 +452,20 @@ mod tests {
         assert_eq!(
             idx, 0,
             "phải nhận diện index tái dùng (0), không phải max (1)"
+        );
+    }
+
+    #[tokio::test]
+    async fn launch_khong_fingerprint_van_cho_boot() {
+        // Tài khoản CHƯA có fingerprint (hw = None) vẫn phải chờ boot trước khi
+        // chạy adb (restore/start_app) — nếu không sẽ đua với quá trình boot.
+        let (state, _memuc, adb) = make_state("nohw");
+        let restored = launch_instance(&state, 0, "acc-khong-hw").await.unwrap();
+        assert!(!restored, "chưa có snapshot → không restore");
+        assert_eq!(
+            adb.boot_wait_count(),
+            1,
+            "phải chờ boot dù không có fingerprint"
         );
     }
 

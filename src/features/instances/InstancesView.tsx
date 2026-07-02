@@ -11,6 +11,15 @@ import { InstanceRow } from './InstanceRow';
 import { BulkToolbar } from './BulkToolbar';
 import { CreateInstanceDialog } from './CreateInstanceDialog';
 
+/**
+ * Khóa định danh tài khoản để backup/restore session — dùng tên tài khoản TikTok
+ * (ỔN ĐỊNH), KHÔNG dùng title VM memuc (tạm thời, có thể tái dùng khi hủy/tạo lại
+ * VM → nhiễm chéo phiên). Fallback về title nếu VM chưa gắn tài khoản.
+ */
+function accountKeyOf(i: Instance): string {
+  return i.account?.tiktokUsername?.trim() || i.title;
+}
+
 export function InstancesView() {
   const {
     instances,
@@ -59,7 +68,7 @@ export function InstancesView() {
   const doLaunch = (instance: Instance) => {
     const name = instance.account?.tiktokUsername || instance.title;
     toast.info(`Đang nạp & chạy "${name}"…`);
-    void launch(instance.index, instance.title)
+    void launch(instance.index, accountKeyOf(instance))
       .then((restored) =>
         toast.success(
           restored
@@ -108,7 +117,7 @@ export function InstancesView() {
   };
 
   const doBackup = (instance: Instance) => {
-    void backup(instance.index, instance.title)
+    void backup(instance.index, accountKeyOf(instance))
       .then((rec) =>
         toast.success(`Đã backup "${instance.title}" — nén + mã hóa (${formatBytes(rec.sizeBytes)})`),
       )
@@ -116,7 +125,7 @@ export function InstancesView() {
   };
 
   const doRestore = (instance: Instance) => {
-    void restore(instance.index, instance.title)
+    void restore(instance.index, accountKeyOf(instance))
       .then((rec) => {
         const when = new Date(rec.createdAt).toLocaleString('vi-VN');
         toast.success(`Đã nạp snapshot "${instance.title}" (lúc ${when})`);
