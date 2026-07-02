@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
@@ -57,13 +58,19 @@ pub struct LocalSnapshotStore {
     root: PathBuf,
     /// Khóa AES-256-GCM. None = không mã hóa (chỉ nén).
     cipher_key: Option<Key32>,
+    /// Bộ đếm để đặt tên file .tmp DUY NHẤT (chống đè khi hai `put` chạy song song).
+    tmp_seq: AtomicU64,
 }
 
 impl LocalSnapshotStore {
     pub fn new(root: impl Into<PathBuf>, cipher_key: Option<Key32>) -> AppResult<Self> {
         let root = root.into();
         fs::create_dir_all(&root)?;
-        Ok(Self { root, cipher_key })
+        Ok(Self {
+            root,
+            cipher_key,
+            tmp_seq: AtomicU64::new(0),
+        })
     }
 
     fn key_path(&self, key: &str) -> PathBuf {
@@ -87,9 +94,11 @@ impl SnapshotStore for LocalSnapshotStore {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
-        // Ghi nguyên tử: ghi .tmp rồi rename (rename cùng ổ đĩa là atomic) →
-        // không bao giờ để lại snapshot ghi dở (toàn vẹn — §7 thiết kế).
-        let tmp = dst.with_extension("tmp");
+        // Ghi nguyên tử: ghi .tmp DUY NHẤT rồi rename (rename cùng ổ đĩa là atomic) →
+        // không bao giờ để lại snapshot ghi dở, và hai put song song không đè .tmp nhau.
+        let seq = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
+        let fname = dst.file_name().and_then(|s| s.to_str()).unwrap_or("snap");
+        let tmp = dst.with_file_name(format!("{fname}.{}.{seq}.tmp", std::process::id()));
         fs::write(&tmp, &blob)?;
         fs::rename(&tmp, &dst)?;
 
@@ -183,8 +192,13 @@ mod tests {
         let src = dir.join("s.tar");
         fs::write(&src, b"data").unwrap();
         store.put("a/x.tar.zst", &src).await.unwrap();
-        // Không còn file .tmp bên cạnh.
-        assert!(!dir.join("kho/a/x.tmp").exists());
+        // Không còn BẤT KỲ file .tmp nào trong thư mục kho sau khi ghi.
+        let leftover: Vec<_> = fs::read_dir(dir.join("kho/a"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "còn sót file .tmp: {leftover:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

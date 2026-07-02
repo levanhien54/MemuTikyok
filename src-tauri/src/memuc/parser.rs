@@ -58,13 +58,35 @@ fn parse_line(line: &str) -> Option<Instance> {
         }
     };
 
+    // Định dạng đầy đủ: index,title,handle,status,pid,disk (6 trường). Nếu TÊN VM có
+    // dấu phẩy (VM tạo ngoài MPM), số trường > 6 → 4 trường CUỐI là phần số cố định
+    // (handle,status,pid,disk), phần giữa gộp lại là title.
+    let (title, handle, status, pid, disk) = if fields.len() > 6 {
+        let n = fields.len();
+        (
+            fields[1..n - 4].join(",").trim().to_string(),
+            fields[n - 4],
+            fields[n - 3],
+            fields.get(n - 2).copied(),
+            fields.get(n - 1).copied(),
+        )
+    } else {
+        (
+            fields[1].trim().to_string(),
+            fields[2],
+            fields[3],
+            fields.get(4).copied(),
+            fields.get(5).copied(),
+        )
+    };
+
     Some(Instance {
         index,
-        title: fields[1].trim().to_string(),
-        status: parse_status(fields[3]),
-        window_handle: parse_optional_i64(fields[2]),
-        pid: fields.get(4).and_then(|s| parse_optional_u32(s)),
-        disk_usage_bytes: fields.get(5).and_then(|s| parse_optional_u64(s)),
+        title,
+        status: parse_status(status),
+        window_handle: parse_optional_i64(handle),
+        pid: pid.and_then(parse_optional_u32),
+        disk_usage_bytes: disk.and_then(parse_optional_u64),
         ip: None, // IP lấy riêng qua adb khi cần (FR-A-3)
         // Các trường sau do metadata store cung cấp (merge sau khi list).
         last_launched_at: None,
@@ -149,5 +171,20 @@ mod tests {
         let out = "0, My VM ,100,0";
         let vms = parse_listvms(out);
         assert_eq!(vms[0].title, "My VM");
+    }
+
+    #[test]
+    fn title_co_dau_phay_van_parse_dung() {
+        // VM tạo ngoài MPM có dấu phẩy trong tên (format đầy đủ 6 trường + phẩy).
+        let out = "2,My,VM,name,197666,1,10508,4096";
+        let vms = parse_listvms(out);
+        assert_eq!(vms.len(), 1);
+        let vm = &vms[0];
+        assert_eq!(vm.index, 2);
+        assert_eq!(vm.title, "My,VM,name");
+        assert_eq!(vm.window_handle, Some(197666));
+        assert_eq!(vm.status, InstanceStatus::Running);
+        assert_eq!(vm.pid, Some(10508));
+        assert_eq!(vm.disk_usage_bytes, Some(4096));
     }
 }

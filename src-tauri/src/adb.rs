@@ -259,7 +259,12 @@ impl AdbWorker for RealAdbWorker {
                 .await
                 .unwrap_or_default();
             let s = String::from_utf8_lossy(&r);
-            if s.contains(f) && !s.contains("No such") {
+            // Chỉ tính là "có" khi ls in ra đúng đường dẫn, KHÔNG kèm thông báo lỗi
+            // (No such / Permission denied / not found) — tránh dương tính giả.
+            let errored = ["No such", "Permission denied", "not found"]
+                .iter()
+                .any(|e| s.contains(e));
+            if s.contains(f) && !errored {
                 found.push(f);
             }
         }

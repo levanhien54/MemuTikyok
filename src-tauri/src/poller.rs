@@ -14,15 +14,21 @@ pub const INSTANCES_UPDATE_EVENT: &str = "instances:update";
 
 /// Khởi động vòng lặp polling nền. Không bao giờ trả về (chạy suốt đời app).
 pub async fn run(app: AppHandle, state: SharedState) {
-    let period = {
-        let s = state.settings.lock().await;
-        // Chặn 0 (interval(0) panic) và giá trị quá nhỏ gây quá tải.
-        Duration::from_millis((s.poll_interval_ms.max(250)) as u64)
-    };
-    let mut ticker = interval(period);
+    // Chặn 0 (interval(0) panic) và giá trị quá nhỏ gây quá tải.
+    let read_period = |ms: u32| Duration::from_millis(ms.max(250) as u64);
+    let mut current = { state.settings.lock().await.poll_interval_ms };
+    let mut ticker = interval(read_period(current));
 
     loop {
         ticker.tick().await;
+
+        // Áp NGAY khi người dùng đổi chu kỳ trong Settings (không cần restart app).
+        let latest = { state.settings.lock().await.poll_interval_ms };
+        if latest != current {
+            current = latest;
+            ticker = interval(read_period(current));
+            ticker.tick().await; // bỏ tick tức thì đầu tiên của ticker mới
+        }
         match state.memuc.list_instances().await {
             Ok(list) => {
                 let mut instances = state.merge_metadata(list).await;
