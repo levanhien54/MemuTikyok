@@ -43,3 +43,6 @@ coverage/
 
 # App runtime assets — APK TikTok + build MEmu (nặng, không phải mã nguồn)
 appTiktok/
+
+# Bản build cài đặt (artifact, không commit)
+release/

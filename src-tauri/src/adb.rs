@@ -10,10 +10,15 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use tokio::process::Command;
+use tokio::time::{timeout, Duration};
 
 use crate::error::{AppError, AppResult};
 use crate::model::{EmulatorTell, SnapshotMeta};
 use crate::snapshot::sha256_file;
+
+/// Trần thời gian cho một lệnh `memuc adb`. Đủ rộng cho thao tác nặng nhất
+/// (install APK ~220MB, backup/restore) nhưng vẫn chặn treo vô hạn nếu adb đơ.
+const ADB_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[async_trait]
 pub trait AdbWorker: Send + Sync {
@@ -55,11 +60,22 @@ impl RealAdbWorker {
     }
 
     /// Chạy `memuc -i <idx> adb "<adb_arg>"`, trả về stdout dạng bytes.
+    ///
+    /// - **CREATE_NO_WINDOW**: ẩn cửa sổ console → KHÔNG nhấp nháy khi poll boot
+    ///   (mỗi 3s) hay gọi adb liên tục (fix "cửa sổ cmd chớp nháy").
+    /// - **kill_on_drop + timeout**: hết giờ thì hủy tiến trình con, không treo vô hạn.
     async fn adb(&self, idx: u32, adb_arg: &str) -> AppResult<Vec<u8>> {
-        let output = Command::new(&self.memuc_path)
-            .args(["-i", &idx.to_string(), "adb", adb_arg])
-            .output()
-            .await?;
+        let mut cmd = Command::new(&self.memuc_path);
+        cmd.args(["-i", &idx.to_string(), "adb", adb_arg]);
+        cmd.kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = timeout(ADB_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))??;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(AppError::CommandFailed(format!("adb '{adb_arg}': {err}")));
@@ -166,7 +182,7 @@ impl AdbWorker for RealAdbWorker {
     }
 
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()> {
-        use tokio::time::{sleep, Duration};
+        use tokio::time::sleep;
         // Poll tối đa ~180s. Boot có thể vượt 90s khi host tải nặng (nhiều VM chạy) —
         // phát hiện qua test thực. `memuc adb` có thể chèn dòng "already connected ..."
         // trước giá trị → lấy token cuối cùng để so sánh (bug đã gặp trên MEmu thật).

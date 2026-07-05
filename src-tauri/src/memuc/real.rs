@@ -67,6 +67,9 @@ impl RealMemuc {
     async fn run_to(&self, args: &[&str], dur: Duration) -> AppResult<String> {
         let mut cmd = Command::new(&self.memuc_path);
         cmd.args(args);
+        // Hết giờ (timeout) thì HỦY tiến trình con thật sự — nếu không, tokio chỉ drop
+        // future và memuc.exe con vẫn chạy ngầm (mồ côi, có thể hoàn tất thao tác lệch trạng thái).
+        cmd.kill_on_drop(true);
         // Ẩn cửa sổ console con trên Windows (tokio::process::Command có sẵn creation_flags).
         #[cfg(windows)]
         {
