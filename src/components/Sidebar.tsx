@@ -5,7 +5,7 @@ export type View = 'dashboard' | 'instances' | 'automation' | 'logs' | 'settings
 
 const NAV: { id: View; label: string; icon: typeof LayoutDashboard; soon?: boolean }[] = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'instances', label: 'Instances', icon: MonitorSmartphone },
+  { id: 'instances', label: 'Tài khoản', icon: MonitorSmartphone },
   { id: 'automation', label: 'Automation', icon: Zap, soon: true },
   { id: 'logs', label: 'Logs', icon: ScrollText },
   { id: 'settings', label: 'Settings', icon: Settings },

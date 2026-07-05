@@ -81,7 +81,7 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
           <motion.div
             role="dialog"
             aria-modal="true"
-            aria-label={isEdit ? 'Chỉnh sửa thông tin máy ảo' : 'Tạo máy ảo mới'}
+            aria-label={isEdit ? 'Chỉnh sửa thông tin tài khoản' : 'Tạo profile mới'}
             className="w-full max-w-lg rounded-lg border border-border bg-surface p-6 shadow-soft"
             initial={{ scale: 0.96, y: 10 }}
             animate={{ scale: 1, y: 0 }}
@@ -93,13 +93,13 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
                 {isEdit ? <Pencil size={16} /> : <UserPlus size={16} />}
               </span>
               <h2 className="text-lg font-semibold">
-                {isEdit ? 'Chỉnh sửa thông tin' : 'Tạo máy ảo mới'}
+                {isEdit ? 'Chỉnh sửa thông tin' : 'Tạo profile mới'}
               </h2>
             </div>
             <p className="mb-5 text-sm text-fg-muted">
               {isEdit
                 ? 'Cập nhật tài khoản, quốc gia yêu cầu và ghi chú. Thông tin đăng nhập được lưu cục bộ và mã hóa.'
-                : 'Tên máy ảo chính là tài khoản TikTok. Thông tin đăng nhập được lưu cục bộ và mã hóa.'}
+                : 'Chỉ tạo hồ sơ (dữ liệu tài khoản) — chưa cấp máy ảo. VM được cấp từ pool khi bấm Chạy. Thông tin đăng nhập lưu cục bộ và mã hóa.'}
             </p>
 
             <form
@@ -110,7 +110,7 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
               }}
             >
               <Input
-                label="Tên máy ảo / Tài khoản TikTok *"
+                label="Tài khoản TikTok (tên profile) *"
                 placeholder="vd: tiktok_minh"
                 value={form.tiktokUsername}
                 onChange={set('tiktokUsername')}
@@ -193,7 +193,7 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
                   Hủy
                 </Button>
                 <Button type="submit" variant="primary" disabled={!usernameValid}>
-                  {isEdit ? 'Lưu thay đổi' : 'Tạo máy ảo'}
+                  {isEdit ? 'Lưu thay đổi' : 'Tạo profile'}
                 </Button>
               </div>
             </form>

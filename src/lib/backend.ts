@@ -8,6 +8,7 @@ import type {
   HardwareProfile,
   EmulatorTell,
   SessionReport,
+  ProfileView,
 } from '@/types/instance';
 
 /**
@@ -73,6 +74,23 @@ export interface Backend {
     onDone: (report: SessionReport) => void,
     onError: (index: number, message: string) => void,
   ): () => void;
+
+  // ── Profiles (tài khoản = dữ liệu bền, VM = pool tạm — kiến trúc disposable) ──
+  /** Tạo profile mới (CHỈ ghi dữ liệu, KHÔNG tạo VM). Trả username. */
+  createProfile(account: AccountProfile, note: string, country: string | null): Promise<string>;
+  /** Danh sách profile + trạng thái runtime (đang chạy VM nào). */
+  listProfiles(): Promise<ProfileView[]>;
+  updateProfile(
+    username: string,
+    account: AccountProfile,
+    note: string,
+    country: string | null,
+  ): Promise<void>;
+  /** Chạy profile: cấp VM từ pool + restore session + mở TikTok. Trả vm_index. */
+  runProfile(username: string): Promise<number>;
+  /** Dừng profile: backup session → hủy VM. Trả snapshot nếu có. */
+  stopProfile(username: string): Promise<SnapshotRecord | null>;
+  deleteProfile(username: string): Promise<void>;
 
   /** Đăng ký nhận cập nhật danh sách theo thời gian thực. Trả về hàm hủy đăng ký. */
   subscribeInstances(cb: (instances: Instance[]) => void): () => void;

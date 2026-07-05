@@ -12,6 +12,7 @@ import type {
   EmulatorTell,
   InstancesUpdateEvent,
   SessionReport,
+  ProfileView,
 } from '@/types/instance';
 
 /**
@@ -98,6 +99,24 @@ export function createTauriBackend(): Backend {
     },
     runWatchSession(index) {
       return invoke<void>('run_watch_session', { index });
+    },
+    createProfile(account, note, country) {
+      return invoke<string>('create_profile', { account, note, country });
+    },
+    listProfiles() {
+      return invoke<ProfileView[]>('list_profiles');
+    },
+    updateProfile(username, account, note, country) {
+      return invoke<void>('update_profile', { username, account, note, country });
+    },
+    runProfile(username) {
+      return invoke<number>('run_profile', { username });
+    },
+    stopProfile(username) {
+      return invoke<SnapshotRecord | null>('stop_profile', { username });
+    },
+    deleteProfile(username) {
+      return invoke<void>('delete_profile', { username });
     },
     subscribeAutomation(onDone, onError) {
       const pDone = listen<SessionReport>('automation:done', (e) => onDone(e.payload));

@@ -1,11 +1,11 @@
 import { Moon, Search, Sun } from 'lucide-react';
 import { Button } from './ui/Button';
-import { useInstanceStore } from '@/store/useInstanceStore';
+import { useProfileStore } from '@/store/useProfileStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
 
 export function Header() {
-  const search = useInstanceStore((s) => s.search);
-  const setSearch = useInstanceStore((s) => s.setSearch);
+  const search = useProfileStore((s) => s.search);
+  const setSearch = useProfileStore((s) => s.setSearch);
   const theme = useSettingsStore((s) => s.settings?.theme ?? 'dark');
   const toggleTheme = useSettingsStore((s) => s.toggleTheme);
 
@@ -19,8 +19,8 @@ export function Header() {
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Tìm máy ảo theo tên…"
-          aria-label="Tìm kiếm máy ảo"
+          placeholder="Tìm tài khoản theo tên…"
+          aria-label="Tìm kiếm tài khoản"
           className="h-10 w-full rounded-md border border-border bg-surface pl-9 pr-3 text-sm outline-none transition-colors focus:border-primary"
         />
       </div>

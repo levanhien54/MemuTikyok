@@ -9,6 +9,8 @@ import type {
   SnapshotRecord,
   HardwareProfile,
   SessionReport,
+  Profile,
+  ProfileView,
 } from '@/types/instance';
 
 /** Sinh fingerprint mô phỏng, tất định theo tên tài khoản (cho UI demo). */
@@ -143,9 +145,44 @@ async function makeSnapshot(index: number, accountKey: string): Promise<Snapshot
   return record;
 }
 
+const PROFILES_KEY = 'mpm.profiles.v1';
+function loadProfiles(): Record<string, Profile> {
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, Profile>) : {};
+  } catch {
+    return {};
+  }
+}
+function saveProfiles(p: Record<string, Profile>): void {
+  try {
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(p));
+  } catch {
+    /* bỏ qua */
+  }
+}
+
 export function createMockBackend(): Backend {
   const meta = loadMeta();
   let settings = { ...DEFAULT_SETTINGS };
+  // Profile store (kiến trúc disposable). Seed vài profile demo lần đầu.
+  const profiles = loadProfiles();
+  if (Object.keys(profiles).length === 0) {
+    for (const u of ['tiktok_minh', 'tiktok_lan', 'farm_a01']) {
+      profiles[u] = {
+        username: u,
+        account: emptyAccount(u),
+        hardware: mockFingerprint(u),
+        country: null,
+        note: '',
+        createdAt: Date.now(),
+        lastRunAt: null,
+      };
+    }
+    saveProfiles(profiles);
+  }
+  const runningProfiles: Record<string, number> = {};
+  let vmCounter = 100;
   const listeners = new Set<(i: Instance[]) => void>();
   const autoDone = new Set<(r: SessionReport) => void>();
   const autoError = new Set<(index: number, message: string) => void>();
@@ -400,6 +437,63 @@ export function createMockBackend(): Backend {
         autoDone.delete(onDone);
         autoError.delete(onError);
       };
+    },
+    async createProfile(account, note, country) {
+      const username = account.tiktokUsername.trim();
+      if (!username) throw new Error('Tên tài khoản không được rỗng');
+      if (profiles[username]) throw new Error('Profile tên này đã tồn tại');
+      profiles[username] = {
+        username,
+        account: { ...account, tiktokUsername: username },
+        hardware: mockFingerprint(username),
+        country: country?.trim().toUpperCase() || null,
+        note: note.trim(),
+        createdAt: Date.now(),
+        lastRunAt: null,
+      };
+      saveProfiles(profiles);
+      return username;
+    },
+    async listProfiles(): Promise<ProfileView[]> {
+      return Object.values(profiles)
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((p) => ({ profile: p, runningVm: runningProfiles[p.username] ?? null }));
+    },
+    async updateProfile(username, account, note, country) {
+      const p = profiles[username];
+      if (!p) throw new Error('Không tìm thấy profile');
+      p.account = { ...account, tiktokUsername: username };
+      p.note = note.trim();
+      p.country = country?.trim().toUpperCase() || null;
+      saveProfiles(profiles);
+    },
+    async runProfile(username) {
+      if (runningProfiles[username] != null) return runningProfiles[username]!;
+      if (Object.keys(runningProfiles).length >= 5)
+        throw new Error('Đã đạt tối đa 5 VM chạy đồng thời — dừng bớt profile khác');
+      const vm = vmCounter++;
+      runningProfiles[username] = vm;
+      if (profiles[username]) {
+        profiles[username].lastRunAt = Date.now();
+        saveProfiles(profiles);
+      }
+      return vm;
+    },
+    async stopProfile(username) {
+      if (runningProfiles[username] == null) return null;
+      delete runningProfiles[username];
+      return {
+        storageKey: `${username}/${Date.now()}.tar.zst`,
+        sha256: 'mock',
+        sizeBytes: 3_500_000,
+        apkVersion: 'mock-1.0',
+        createdAt: Date.now(),
+      };
+    },
+    async deleteProfile(username) {
+      delete profiles[username];
+      delete runningProfiles[username];
+      saveProfiles(profiles);
     },
     subscribeInstances(cb) {
       listeners.add(cb);

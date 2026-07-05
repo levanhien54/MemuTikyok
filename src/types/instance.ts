@@ -63,6 +63,24 @@ export interface HardwareProfile {
   buildFingerprint?: string;
 }
 
+/** Profile = tài khoản (dữ liệu bền), tách khỏi VM (kiến trúc disposable). */
+export interface Profile {
+  username: string;
+  account: AccountProfile;
+  hardware: HardwareProfile;
+  country: string | null;
+  note: string;
+  createdAt: number;
+  lastRunAt: number | null;
+}
+
+/** Profile + trạng thái runtime (đang chạy trên VM nào). */
+export interface ProfileView {
+  profile: Profile;
+  /** vm_index đang chạy (null = idle). */
+  runningVm: number | null;
+}
+
 /** Payload tạo VM kèm hồ sơ tài khoản + ghi chú. */
 export interface CreateInstancePayload {
   account: AccountProfile;
