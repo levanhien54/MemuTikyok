@@ -3,13 +3,14 @@ import { MonitorSmartphone, Plus, RefreshCw, ServerCrash } from 'lucide-react';
 import { useInstanceStore } from '@/store/useInstanceStore';
 import { toast } from '@/store/useToastStore';
 import { formatBytes } from '@/lib/format';
-import type { BulkOperation, Instance } from '@/types/instance';
+import type { BulkOperation, Instance, HardwareProfile } from '@/types/instance';
 import { Button } from '@/components/ui/Button';
 import { StateView, LoadingView } from '@/components/ui/StateView';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { InstanceRow } from './InstanceRow';
 import { BulkToolbar } from './BulkToolbar';
 import { CreateInstanceDialog } from './CreateInstanceDialog';
+import { FingerprintDialog } from './FingerprintDialog';
 
 /**
  * Khóa định danh tài khoản để backup/restore session — dùng tên tài khoản TikTok
@@ -50,6 +51,10 @@ export function InstancesView() {
   const [pendingDelete, setPendingDelete] = useState<Instance | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editInstance, setEditInstance] = useState<Instance | null>(null);
+  const [fpState, setFpState] = useState<{
+    name: string;
+    hardware: HardwareProfile | null | undefined;
+  } | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -81,16 +86,14 @@ export function InstancesView() {
 
   const doViewFingerprint = (instance: Instance) => {
     const name = instance.account?.tiktokUsername || instance.title;
+    // Mở dialog ngay ở trạng thái "đang tải", rồi nạp đúng dữ liệu fingerprint đã lưu.
+    setFpState({ name, hardware: undefined });
     void getHardware(instance.index)
-      .then((hw) => {
-        if (!hw) {
-          toast.info(`"${name}" chưa có fingerprint`);
-          return;
-        }
-        const imei4 = hw.imei.slice(-4);
-        toast.info(`🔒 ${name}: ${hw.brand} ${hw.model} · IMEI ••••${imei4} · AID ••••${hw.androidId.slice(-4)}`);
-      })
-      .catch((e: unknown) => toast.error(`Lỗi: ${e instanceof Error ? e.message : e}`));
+      .then((hw) => setFpState({ name, hardware: hw }))
+      .catch((e: unknown) => {
+        setFpState(null);
+        toast.error(`Lỗi nạp fingerprint: ${e instanceof Error ? e.message : e}`);
+      });
   };
 
   const doScanEmulator = (instance: Instance) => {
@@ -276,6 +279,13 @@ export function InstancesView() {
           }
           setEditInstance(null);
         }}
+      />
+
+      <FingerprintDialog
+        open={fpState !== null}
+        accountName={fpState?.name ?? ''}
+        hardware={fpState?.hardware}
+        onClose={() => setFpState(null)}
       />
 
       <ConfirmDialog
