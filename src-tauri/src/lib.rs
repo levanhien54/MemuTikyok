@@ -228,8 +228,10 @@ pub fn run() {
     app_state.set_magisk_bin(magisk_bin);
     let reconcile_state = app_state.clone();
 
+    // KHÔNG dùng tauri-plugin-log: logcap (tracing-subscriber) đã sở hữu global logger
+    // (bắc cầu `log`→tracing qua try_init) + LogsView đọc ring buffer. Nếu thêm plugin-log,
+    // nó cố set logger LẦN 2 → PluginInitialization panic → app tắt câm khi khởi động.
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().build())
         .manage(app_state)
         .manage(log_buffer)
         .setup(move |_app| {
