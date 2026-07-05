@@ -18,7 +18,7 @@ function mockFingerprint(title: string): HardwareProfile {
     {
       model: 'SM-N935F', brand: 'samsung', manufacturer: 'samsung', device: 'gracerlte',
       buildFingerprint: 'samsung/gracerltexx/gracerlte:8.0.0/R16NW/N935FXXS4BRK2:user/release-keys',
-      resWidth: 1440, resHeight: 2560, dpi: 640,
+      resWidth: 1080, resHeight: 1920, dpi: 480,
     },
     {
       model: 'SM-G960F', brand: 'samsung', manufacturer: 'samsung', device: 'starlte',

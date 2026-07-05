@@ -170,15 +170,28 @@ impl MemucClient for RealMemuc {
     }
 
     async fn set_resolution(&self, index: u32, width: u32, height: u32, dpi: u32) -> AppResult<()> {
+        // Chặn (kẹp) độ phân giải làm CRASH MEmu Launcher2: QHD/dpi cao (vd 1440×2560@640)
+        // khiến launcher "keeps stopping" — đã kiểm chứng logcat. Giữ ngưỡng MEmu-an-toàn.
+        let w = width.min(1080);
+        let h = height.min(2400);
+        let d = dpi.min(480);
+        if (w, h, d) != (width, height, dpi) {
+            tracing::warn!(
+                width,
+                height,
+                dpi,
+                "Độ phân giải vượt ngưỡng an toàn — kẹp về {w}x{h}@{d}"
+            );
+        }
         // memuc: setconfigex -i N custom_resolution <w> <h> <dpi> (3 tham số riêng).
         self.run(&[
             "setconfigex",
             "-i",
             &index.to_string(),
             "custom_resolution",
-            &width.to_string(),
-            &height.to_string(),
-            &dpi.to_string(),
+            &w.to_string(),
+            &h.to_string(),
+            &d.to_string(),
         ])
         .await
         .map(|_| ())
