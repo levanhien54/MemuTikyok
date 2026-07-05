@@ -308,7 +308,10 @@ async fn a1_create_vm_new_index() {
     guard.track(idx);
 
     assert_new_index(&before, idx);
-    assert!(index_set(&state).await.contains(&idx), "VM mới có trong list");
+    assert!(
+        index_set(&state).await.contains(&idx),
+        "VM mới có trong list"
+    );
     // VM 0 vẫn còn.
     let list = state.memuc.list_instances().await.expect("list");
     assert!(list.iter().any(|v| v.index == 0), "VM 0 phải còn tồn tại");
@@ -520,7 +523,10 @@ async fn a4_provision_fingerprint_inject() {
     // ro.build.characteristics là soft.
     if let Some(t) = by_check("ro.build.characteristics") {
         if t.detected {
-            eprintln!("[soft] ro.build.characteristics vẫn 'tablet': {:?}", t.detail);
+            eprintln!(
+                "[soft] ro.build.characteristics vẫn 'tablet': {:?}",
+                t.detail
+            );
         }
     }
     // GMS/GSF phải còn (không nằm trong DEFAULT_BLOAT).
@@ -606,13 +612,13 @@ async fn a6_install_tiktok_apk() {
     guard.track(idx);
     assert_new_index(&before, idx);
 
-    state.queue.run(state.memuc.start(idx)).await.expect("start");
-    state.mark_launched(idx).await;
     state
-        .adb
-        .wait_boot_completed(idx)
+        .queue
+        .run(state.memuc.start(idx))
         .await
-        .expect("wait_boot");
+        .expect("start");
+    state.mark_launched(idx).await;
+    state.adb.wait_boot_completed(idx).await.expect("wait_boot");
 
     state
         .adb
@@ -620,11 +626,7 @@ async fn a6_install_tiktok_apk() {
         .await
         .expect("install_apk phải Ok");
 
-    let pkgs = vm_adb_raw(
-        &mp,
-        idx,
-        &format!("shell pm list packages {TIKTOK_PKG}"),
-    );
+    let pkgs = vm_adb_raw(&mp, idx, &format!("shell pm list packages {TIKTOK_PKG}"));
     assert!(
         pkgs.contains(&format!("package:{TIKTOK_PKG}")),
         "TikTok phải được cài: {pkgs}"
@@ -677,7 +679,11 @@ async fn a8_swap_account_running_vm() {
         .install_apk(idx, DEFAULT_TIKTOK_APK)
         .await
         .expect("install_apk");
-    state.adb.start_app(idx, TIKTOK_PKG).await.expect("start_app");
+    state
+        .adb
+        .start_app(idx, TIKTOK_PKG)
+        .await
+        .expect("start_app");
 
     // Ghi marker E2E-NEW → backup thành snapshot acc_new.
     let marker = format!("/data/data/{TIKTOK_PKG}/files/mpm_marker.txt");
@@ -784,13 +790,12 @@ async fn a9_full_disposable_roundtrip() {
         ),
     );
     let pre = vm_shell(&mp, idx1, &format!("cat {marker}"));
-    assert!(pre.contains(&payload), "marker phải có mặt trước backup: {pre}");
-    let pre_label = vm_shell(&mp, idx1, &format!("ls -Z {marker}"));
-    let pre_owner = vm_shell(
-        &mp,
-        idx1,
-        &format!("stat -c %U:%G /data/data/{TIKTOK_PKG}"),
+    assert!(
+        pre.contains(&payload),
+        "marker phải có mặt trước backup: {pre}"
     );
+    let pre_label = vm_shell(&mp, idx1, &format!("ls -Z {marker}"));
+    let pre_owner = vm_shell(&mp, idx1, &format!("stat -c %U:%G /data/data/{TIKTOK_PKG}"));
     eprintln!("[info] pre label={pre_label} owner={pre_owner}");
 
     // --- Teardown (backup → stop → remove) ---
@@ -847,7 +852,11 @@ async fn a9_full_disposable_roundtrip() {
         // provision đã restore TRƯỚC install; install -r không xóa /data/data data dir,
         // nhưng để chắc, restore lại từ store.
         let tmp = dir.join("relaunch.tar.zst");
-        state.store.get(&rec.storage_key, &tmp).await.expect("get blob");
+        state
+            .store
+            .get(&rec.storage_key, &tmp)
+            .await
+            .expect("get blob");
         state
             .adb
             .restore(idx2, TIKTOK_PKG, &tmp)
@@ -923,6 +932,13 @@ impl AdbWorker for FailingBackupAdb {
     }
     async fn harden(&self, idx: u32) -> AppResult<()> {
         self.0.harden(idx).await
+    }
+    async fn lock_device_identity(
+        &self,
+        idx: u32,
+        hw: &crate::model::HardwareProfile,
+    ) -> AppResult<bool> {
+        self.0.lock_device_identity(idx, hw).await
     }
 }
 
@@ -1052,7 +1068,11 @@ async fn a11_snapshot_integrity_retention() {
     // 2 bản cũ nhất: blob đã bị xóa → verify false.
     for old in &recs[0..2] {
         assert!(
-            !state.store.verify(&old.storage_key, &old.sha256).await.unwrap(),
+            !state
+                .store
+                .verify(&old.storage_key, &old.sha256)
+                .await
+                .unwrap(),
             "blob cũ {} phải bị xóa (verify false)",
             old.storage_key
         );
@@ -1063,7 +1083,11 @@ async fn a11_snapshot_integrity_retention() {
     let last = recs.last().unwrap();
     assert_eq!(latest.storage_key, last.storage_key, "latest = bản cuối");
     assert!(
-        state.store.verify(&latest.storage_key, &latest.sha256).await.unwrap(),
+        state
+            .store
+            .verify(&latest.storage_key, &latest.sha256)
+            .await
+            .unwrap(),
         "blob mới nhất phải verify true"
     );
 
@@ -1079,7 +1103,11 @@ async fn a11_snapshot_integrity_retention() {
 
     // Restore latest → cat marker == "V6".
     let out = dir.join("latest.tar.zst");
-    state.store.get(&latest.storage_key, &out).await.expect("get latest");
+    state
+        .store
+        .get(&latest.storage_key, &out)
+        .await
+        .expect("get latest");
     state
         .adb
         .restore(idx, TIKTOK_PKG, &out)

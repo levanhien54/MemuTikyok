@@ -247,7 +247,8 @@ mod tests {
                 res_height: 2400,
                 dpi: 420,
                 device: "o1s".into(),
-                build_fingerprint: "samsung/o1sxx/o1s:12/SP1A.210812.016/G991BXXU5CVF2:user/release-keys".into(),
+                build_fingerprint:
+                    "samsung/o1sxx/o1s:12/SP1A.210812.016/G991BXXU5CVF2:user/release-keys".into(),
             }),
         }
     }

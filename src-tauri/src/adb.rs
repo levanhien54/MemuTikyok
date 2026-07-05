@@ -13,7 +13,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 use crate::error::{AppError, AppResult};
-use crate::model::{EmulatorTell, SnapshotMeta};
+use crate::model::{EmulatorTell, HardwareProfile, SnapshotMeta};
 use crate::snapshot::sha256_file;
 
 /// Trần thời gian cho một lệnh `memuc adb`. Đủ rộng cho thao tác nặng nhất
@@ -44,6 +44,11 @@ pub trait AdbWorker: Send + Sync {
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>>;
     /// Ẩn/sửa các dấu vết SỬA ĐƯỢC (best-effort; ro.* cần reboot mới ăn).
     async fn harden(&self, idx: u32) -> AppResult<()>;
+    /// KHÓA định danh thiết bị (ro.product.model/brand/manufacturer/device +
+    /// ro.build.fingerprint) SAU boot bằng **resetprop** — chống MEmu random model.
+    /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop (cần Magisk trong base
+    /// image — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
+    async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool>;
 }
 
 // ------------------------ Real (memuc adb) ------------------------
@@ -346,6 +351,51 @@ impl AdbWorker for RealAdbWorker {
             .await;
         Ok(())
     }
+
+    async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool> {
+        if hw.build_fingerprint.is_empty() {
+            return Ok(false); // hồ sơ cũ chưa có fingerprint → không có gì để khóa
+        }
+        // 1) Tìm resetprop (applet Magisk) ở PATH hoặc các vị trí phổ biến.
+        let probe = self
+            .adb(
+                idx,
+                "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo \"$p\" && break; done'",
+            )
+            .await
+            .unwrap_or_default();
+        let rp = String::from_utf8_lossy(&probe)
+            .lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty() && !l.contains("already connected"))
+            .map(|s| s.to_string());
+        let Some(rp) = rp.filter(|s| s == "resetprop" || s.starts_with('/')) else {
+            tracing::warn!(
+                idx,
+                "VM chưa có resetprop — bỏ qua khóa model (cần Magisk trong base image)"
+            );
+            return Ok(false);
+        };
+        // 2) Áp trọn bộ props nhất quán (giá trị bọc nháy kép để chịu khoảng trắng như "Redmi Note 8").
+        let props: [(&str, &str); 6] = [
+            ("ro.product.model", &hw.model),
+            ("ro.product.brand", &hw.brand),
+            ("ro.product.manufacturer", &hw.manufacturer),
+            ("ro.product.device", &hw.device),
+            ("ro.product.name", &hw.device),
+            ("ro.build.fingerprint", &hw.build_fingerprint),
+        ];
+        for (key, val) in props {
+            if val.is_empty() {
+                continue;
+            }
+            let _ = self
+                .adb(idx, &format!("shell su -c '{rp} {key} \"{val}\"'"))
+                .await;
+        }
+        // 3) Verify: model runtime đã bằng giá trị ta khóa chưa.
+        Ok(self.prop(idx, "ro.product.model").await == hw.model)
+    }
 }
 
 // ------------------------ Mock (in-memory) ------------------------
@@ -356,6 +406,7 @@ pub struct MockAdbWorker {
     devices: Mutex<HashMap<u32, Vec<u8>>>,
     android_ids: Mutex<HashMap<u32, String>>,
     boot_waits: std::sync::atomic::AtomicUsize,
+    locked_models: Mutex<HashMap<u32, String>>,
 }
 
 impl MockAdbWorker {
@@ -364,6 +415,7 @@ impl MockAdbWorker {
             devices: Mutex::new(HashMap::new()),
             android_ids: Mutex::new(HashMap::new()),
             boot_waits: std::sync::atomic::AtomicUsize::new(0),
+            locked_models: Mutex::new(HashMap::new()),
         }
     }
 
@@ -371,6 +423,12 @@ impl MockAdbWorker {
     #[cfg(test)]
     pub fn boot_wait_count(&self) -> usize {
         self.boot_waits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Model đã bị khóa qua `lock_device_identity` cho một VM (kiểm wiring).
+    #[cfg(test)]
+    pub fn locked_model_of(&self, idx: u32) -> Option<String> {
+        self.locked_models.lock().unwrap().get(&idx).cloned()
     }
 
     /// Set dữ liệu app cho một VM (dùng trong test/dev).
@@ -493,6 +551,17 @@ impl AdbWorker for MockAdbWorker {
 
     async fn harden(&self, _idx: u32) -> AppResult<()> {
         Ok(())
+    }
+
+    async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool> {
+        if hw.build_fingerprint.is_empty() {
+            return Ok(false);
+        }
+        self.locked_models
+            .lock()
+            .unwrap()
+            .insert(idx, hw.model.clone());
+        Ok(true)
     }
 }
 

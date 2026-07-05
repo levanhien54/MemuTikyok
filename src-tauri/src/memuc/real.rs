@@ -139,7 +139,9 @@ impl MemucClient for RealMemuc {
     }
 
     async fn create(&self) -> AppResult<()> {
-        self.run_to(&["create"], LIFECYCLE_TIMEOUT).await.map(|_| ())
+        self.run_to(&["create"], LIFECYCLE_TIMEOUT)
+            .await
+            .map(|_| ())
     }
 
     async fn clone_vm(&self, index: u32) -> AppResult<()> {

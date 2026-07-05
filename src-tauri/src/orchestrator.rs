@@ -137,6 +137,9 @@ pub async fn provision(
     state.mark_launched(index).await;
     state.adb.wait_boot_completed(index).await?;
     state.adb.apply_android_id(index, &hw.android_id).await?;
+    // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
+    // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
+    let _ = state.adb.lock_device_identity(index, hw).await;
     auto_debloat(state, index).await;
 
     // 4) Restore snapshot mới nhất nếu có (verify sha256 trước).
@@ -175,6 +178,9 @@ pub async fn clone_from_base(
     state.mark_launched(index).await;
     state.adb.wait_boot_completed(index).await?;
     state.adb.apply_android_id(index, &hw.android_id).await?;
+    // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
+    // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
+    let _ = state.adb.lock_device_identity(index, hw).await;
     auto_debloat(state, index).await;
 
     if let Some(db) = &state.db {
@@ -300,6 +306,9 @@ pub async fn launch_instance(
 
     if let Some(hw) = &hw {
         state.adb.apply_android_id(index, &hw.android_id).await?;
+        // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
+        // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
+        let _ = state.adb.lock_device_identity(index, hw).await;
     }
 
     // Restore session tài khoản (nếu có; verify sha256).
@@ -363,6 +372,9 @@ pub async fn swap_account(
 
     // 5) android_id (runtime) sau khi boot.
     state.adb.apply_android_id(index, &hw.android_id).await?;
+    // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
+    // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
+    let _ = state.adb.lock_device_identity(index, hw).await;
 
     // 6) Restore session tài khoản mới (nếu có; verify sha256 trước).
     if let Some(db) = &state.db {
@@ -469,6 +481,18 @@ mod tests {
             adb.boot_wait_count(),
             1,
             "phải chờ boot dù không có fingerprint"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_goi_khoa_model() {
+        // provision phải gọi lock_device_identity (khóa model post-boot) với model đúng.
+        let (state, _m, adb) = make_state("lock");
+        let idx = provision(&state, "acc_lock", &hw()).await.unwrap();
+        assert_eq!(
+            adb.locked_model_of(idx).as_deref(),
+            Some("FRD-L19"),
+            "provision phải khóa model qua lock_device_identity"
         );
     }
 

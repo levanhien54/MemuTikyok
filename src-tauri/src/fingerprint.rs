@@ -51,7 +51,8 @@ const DEVICES: &[DeviceProfile] = &[
         brand: "samsung",
         manufacturer: "samsung",
         device: "dreamlte",
-        fingerprint: "samsung/dreamltexx/dreamlte:9/PPR1.180610.011/G950FXXUCDUE1:user/release-keys",
+        fingerprint:
+            "samsung/dreamltexx/dreamlte:9/PPR1.180610.011/G950FXXUCDUE1:user/release-keys",
         w: 1080,
         h: 2220,
         dpi: 480,
