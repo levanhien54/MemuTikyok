@@ -1,13 +1,18 @@
-//! Sinh chuỗi input **GIẢ NGƯỜI** để chống phát hiện tự động hóa.
+//! Sinh chuỗi input kiểu-người (tap/swipe/nhịp chờ) — phần THUẦN, tất định (seed được).
 //!
 //! TikTok/ByteDance chấm điểm bot qua **touch micro-jitter** (vận tốc/áp lực), tọa độ
-//! chính xác tuyệt đối và timing đều tăm tắp của `input tap`/`swipe` thô. Module này
-//! sinh: (a) tap rung tọa độ + thời gian giữ ngẫu nhiên, (b) swipe theo **đường Bézier
-//! cong** với vận tốc ease-in-out + nhiễu (không phải đường thẳng vận tốc đều), (c) nhịp
-//! chờ giữa hành động kiểu người.
+//! chính xác tuyệt đối và timing đều tăm tắp. Module này TÍNH: (a) tap rung tọa độ +
+//! thời gian giữ ngẫu nhiên, (b) swipe theo **đường Bézier cong** vận tốc ease-in-out +
+//! nhiễu, (c) nhịp chờ giữa hành động.
 //!
-//! Phần SINH ở đây là **thuần & tất định (seed được)** → test được. Phần thực thi (adb
-//! `input`) nằm ở `adb.rs`.
+//! ⚠️ GIỚI HẠN THI HÀNH (đọc kỹ trước khi tin "chống bot"): bộ thực thi hiện tại ở
+//! `adb.rs` dùng `input tap/swipe`, chỉ nhận 2 điểm ĐẦU/CUỐI của swipe và bơm sự kiện
+//! tổng hợp → **đường cong Bézier + gia tốc + áp lực tính ở đây KHÔNG tới thiết bị**;
+//! Android nội suy đường thẳng vận tốc tuyến tính. Toàn bộ đường (path 17+ điểm) chỉ
+//! phát huy tác dụng khi có bộ thực thi `sendevent` (/dev/input) — CHƯA có (TODO). Tới
+//! lúc đó, coi swipe/tap là dấu-hiệu-còn-lộ, không phải đã "chống touch-jitter".
+//!
+//! Phần SINH ở đây **thuần & tất định (seed được)** → test được. Thi hành nằm ở `adb.rs`.
 
 /// PRNG xorshift* nhẹ, **seed được** (test tất định). KHÔNG dùng cho mật mã.
 pub struct Rng(u64);

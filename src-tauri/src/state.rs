@@ -15,6 +15,23 @@ use crate::model::{AccountProfile, AppSettings, HardwareProfile, Instance, Profi
 use crate::queue::CommandQueue;
 use crate::snapshot::SnapshotStore;
 
+/// vm_index "đặt chỗ": một lần `run` đang provision (chưa có VM thật). Chiếm slot
+/// trong cổng tối đa để chống đua, nhưng KHÔNG hiển thị là đang chạy. `u32::MAX` là
+/// index bất khả (memuc không bao giờ cấp) nên an toàn làm cờ.
+pub const RESERVED_VM: u32 = u32::MAX;
+
+/// Kết quả đặt chỗ slot chạy (nguyên tử) — xem `AppState::reserve_run_slot`.
+pub enum RunSlot {
+    /// Profile đã chạy trên VM này rồi (trả về ngay, idempotent).
+    AlreadyRunning(u32),
+    /// Một lần `run` khác đang provision profile này — chưa xong.
+    Pending,
+    /// Đã đạt tối đa số VM chạy đồng thời.
+    AtCapacity,
+    /// Đã đặt chỗ thành công — caller được phép provision.
+    Reserved,
+}
+
 /// Metadata do MPM tự quản cho từng VM (không thuộc memuc). Persist vào SQLite.
 #[derive(Debug, Clone, Default)]
 pub struct InstanceMeta {
@@ -121,9 +138,15 @@ impl AppState {
         }
     }
 
-    /// vm_index đang chạy profile này (nếu có).
+    /// vm_index ĐANG CHẠY profile này (bỏ qua slot đặt chỗ `RESERVED_VM` — provision
+    /// chưa xong thì chưa coi là đang chạy, tránh hiện "VM #4294967295").
     pub async fn running_vm_of(&self, username: &str) -> Option<u32> {
-        self.running_profiles.lock().await.get(username).copied()
+        self.running_profiles
+            .lock()
+            .await
+            .get(username)
+            .copied()
+            .filter(|&v| v != RESERVED_VM)
     }
 
     pub async fn set_running_profile(&self, username: &str, vm_index: u32) {
@@ -135,6 +158,37 @@ impl AppState {
 
     pub async fn clear_running_profile(&self, username: &str) {
         self.running_profiles.lock().await.remove(username);
+    }
+
+    /// NGUYÊN TỬ: kiểm idempotency + cổng tối đa RỒI đặt chỗ slot — tất cả dưới MỘT
+    /// khóa. Chống đua (R): N lần `run` song song không cùng vượt cổng; cùng username
+    /// không provision đôi. Caller nhận `Reserved` phải finalize bằng `set_running_profile`
+    /// (thành công) hoặc `clear_running_profile` (lỗi) để nhả chỗ.
+    pub async fn reserve_run_slot(&self, username: &str, max: usize) -> RunSlot {
+        let mut g = self.running_profiles.lock().await;
+        match g.get(username).copied() {
+            Some(v) if v != RESERVED_VM => return RunSlot::AlreadyRunning(v),
+            Some(_) => return RunSlot::Pending,
+            None => {}
+        }
+        if g.len() >= max {
+            return RunSlot::AtCapacity;
+        }
+        g.insert(username.to_string(), RESERVED_VM);
+        RunSlot::Reserved
+    }
+
+    /// NGUYÊN TỬ lấy-và-xóa vm_index đang chạy (bỏ qua slot đặt chỗ). Chỉ MỘT caller
+    /// thắng entry → chống teardown đôi khi hai `stop`/`delete` chạy song song.
+    pub async fn take_running_vm(&self, username: &str) -> Option<u32> {
+        let mut g = self.running_profiles.lock().await;
+        match g.get(username).copied() {
+            Some(v) if v != RESERVED_VM => {
+                g.remove(username);
+                Some(v)
+            }
+            _ => None,
+        }
     }
 
     /// Ghi write-through xuống SQLite (best-effort; lỗi chỉ log).

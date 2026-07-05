@@ -7,10 +7,40 @@
 use crate::error::{AppError, AppResult};
 use crate::model::{AccountProfile, Profile, ProfileView, SnapshotRecord, DEFAULT_TIKTOK_APK, TIKTOK_PKG};
 use crate::orchestrator;
-use crate::state::{now_ms, SharedState};
+use crate::state::{now_ms, RunSlot, SharedState};
 
 /// Số VM chạy đồng thời tối đa (kế hoạch §18: tối đa ~5 VM).
 pub const MAX_RUNNING_VMS: usize = 5;
+
+/// Kiểm tra tên profile — dùng ĐỒNG THỜI làm PRIMARY KEY (SQLite), KHÓA SNAPSHOT
+/// (đường dẫn hệ tệp) và tham số shell. Whitelist NGHIÊM: `[A-Za-z0-9._-]`, ≤64 ký tự,
+/// cấm `..`. Chống path-traversal (username="../.." thoát thư mục snapshot), injection,
+/// và nhầm-vai-trò. Trả tên đã trim khi hợp lệ.
+fn validate_username(name: &str) -> AppResult<String> {
+    let u = name.trim();
+    if u.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Tên tài khoản không được rỗng".into(),
+        ));
+    }
+    if u.chars().count() > 64 {
+        return Err(AppError::InvalidInput(
+            "Tên tài khoản quá dài (tối đa 64 ký tự)".into(),
+        ));
+    }
+    if u == "." || u.contains("..") {
+        return Err(AppError::InvalidInput("Tên tài khoản không hợp lệ".into()));
+    }
+    if !u
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(AppError::InvalidInput(
+            "Tên tài khoản chỉ gồm chữ/số và . _ - (không dấu cách hay ký tự đặc biệt)".into(),
+        ));
+    }
+    Ok(u.to_string())
+}
 
 /// Đường dẫn APK TikTok từ settings (fallback mặc định) — dùng khi provision cài app.
 async fn apk_path(state: &SharedState) -> String {
@@ -31,12 +61,7 @@ pub async fn create(
     note: Option<String>,
     country: Option<String>,
 ) -> AppResult<String> {
-    let username = account.tiktok_username.trim().to_string();
-    if username.is_empty() {
-        return Err(AppError::InvalidInput(
-            "Tên tài khoản không được rỗng".into(),
-        ));
-    }
+    let username = validate_username(&account.tiktok_username)?;
     if state.get_profile(&username).await.is_some() {
         return Err(AppError::InvalidInput("Profile tên này đã tồn tại".into()));
     }
@@ -96,19 +121,19 @@ pub async fn update(
     Ok(())
 }
 
-/// CHẠY profile: cổng quốc gia → chặn quá tải (≤ MAX) → provision VM sạch từ pool
-/// (áp fingerprint + cài TikTok + restore session theo username) → mở TikTok →
+/// CHẠY profile: cổng quốc gia → ĐẶT CHỖ nguyên tử (idempotency + ≤ MAX) → provision
+/// VM sạch (áp fingerprint + cài TikTok + restore session theo username) → mở TikTok →
 /// ghi running map + cập nhật last_run_at. Idempotent: đang chạy → trả VM hiện tại.
 pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
     let profile = state
         .get_profile(username)
         .await
         .ok_or_else(|| AppError::InvalidInput("Không tìm thấy profile".into()))?;
-    // Đã chạy rồi → trả VM hiện tại (không cấp thêm).
+    // Đã chạy rồi → trả VM hiện tại ngay (không tra mạng, không cấp thêm).
     if let Some(vm) = state.running_vm_of(username).await {
         return Ok(vm);
     }
-    // Cổng quốc gia: IP thoát thực tế phải khớp quốc gia yêu cầu của profile.
+    // Cổng quốc gia (validation TRƯỚC khi chiếm slot): IP thoát thực tế phải khớp.
     if let Some(expected) = profile.country.as_deref().filter(|c| !c.is_empty()) {
         match state.geo.country("").await {
             Some(actual) if actual.eq_ignore_ascii_case(expected) => {}
@@ -121,26 +146,41 @@ pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
             None => return Err(AppError::CountryUnverified(expected.to_string())),
         }
     }
-    // Giới hạn số VM chạy đồng thời (kế hoạch: tối đa 5) — bảo vệ RAM/đĩa host.
-    if state.running_profiles.lock().await.len() >= MAX_RUNNING_VMS {
-        return Err(AppError::InvalidInput(format!(
-            "Đã đạt tối đa {MAX_RUNNING_VMS} VM chạy đồng thời — dừng bớt profile khác trước"
-        )));
+    // NGUYÊN TỬ: idempotency + cổng tối đa + ĐẶT CHỖ slot dưới MỘT khóa (chống đua:
+    // nhiều run song song không cùng vượt cổng; cùng username không provision đôi).
+    match state.reserve_run_slot(username, MAX_RUNNING_VMS).await {
+        RunSlot::AlreadyRunning(vm) => return Ok(vm),
+        RunSlot::Pending => {
+            return Err(AppError::InvalidInput(
+                "Profile đang được khởi chạy — vui lòng đợi".into(),
+            ))
+        }
+        RunSlot::AtCapacity => {
+            return Err(AppError::InvalidInput(format!(
+                "Đã đạt tối đa {MAX_RUNNING_VMS} VM chạy đồng thời — dừng bớt profile khác trước"
+            )))
+        }
+        RunSlot::Reserved => {}
     }
-    // Provision VM sạch cho profile: create → fingerprint → boot → CÀI TIKTOK →
-    // restore session (theo username). Cài APK trước restore để pkg tồn tại.
+    // Từ đây đã giữ chỗ → mọi nhánh thoát PHẢI nhả chỗ (clear_running_profile).
+    // APK fail-fast: kiểm tra tồn tại TRƯỚC khi tốn công tạo/boot VM.
     let apk = apk_path(state).await;
-    // Fail-fast: kiểm tra APK tồn tại TRƯỚC khi tốn công tạo/boot VM (nếu thiếu,
-    // provision sẽ boot xong mới lỗi lúc cài → lãng phí; báo lỗi rõ ràng ở đây).
     if !std::path::Path::new(&apk).exists() {
+        state.clear_running_profile(username).await;
         return Err(AppError::InvalidInput(format!(
             "Không tìm thấy APK TikTok tại: {apk} — vào Cài đặt đặt 'Đường dẫn APK TikTok'"
         )));
     }
-    let idx = orchestrator::provision(state, username, &profile.hardware, Some(&apk)).await?;
+    // Provision (ngoài khóa — thao tác dài). Lỗi → NHẢ chỗ đã đặt.
+    let idx = match orchestrator::provision(state, username, &profile.hardware, Some(&apk)).await {
+        Ok(i) => i,
+        Err(e) => {
+            state.clear_running_profile(username).await;
+            return Err(e);
+        }
+    };
     let _ = state.adb.start_app(idx, TIKTOK_PKG).await;
-    state.set_running_profile(username, idx).await;
-    // Cập nhật last_run_at.
+    state.set_running_profile(username, idx).await; // ghi đè RESERVED bằng idx thật
     let mut p = profile;
     p.last_run_at = Some(now_ms());
     state.upsert_profile(p).await;
@@ -150,19 +190,29 @@ pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
 /// DỪNG profile: backup session → HỦY VM (disposable) → nhả running map. Trả
 /// snapshot record nếu đang chạy; `None` nếu profile không chạy (idempotent).
 pub async fn stop(state: &SharedState, username: &str) -> AppResult<Option<SnapshotRecord>> {
-    let Some(idx) = state.running_vm_of(username).await else {
+    // Lấy-và-xóa NGUYÊN TỬ (chỉ một caller thắng entry → chống teardown đôi).
+    let Some(idx) = state.take_running_vm(username).await else {
         return Ok(None);
     };
-    let rec = orchestrator::teardown(state, idx, username).await;
-    state.clear_running_profile(username).await;
-    rec.map(Some)
+    match orchestrator::teardown(state, idx, username).await {
+        Ok(rec) => Ok(Some(rec)),
+        // Teardown lỗi (vd backup fail) → TÁI theo dõi để retry, KHÔNG bỏ VM khỏi map
+        // (nếu bỏ, VM còn chạy nhưng vô chủ, không tính vào cổng, không ai dọn).
+        Err(e) => {
+            state.set_running_profile(username, idx).await;
+            Err(e)
+        }
+    }
 }
 
 /// XÓA profile: nếu đang chạy thì teardown trước (backup + hủy VM), rồi xóa bản ghi.
 pub async fn delete(state: &SharedState, username: &str) -> AppResult<()> {
-    if let Some(idx) = state.running_vm_of(username).await {
-        let _ = orchestrator::teardown(state, idx, username).await;
-        state.clear_running_profile(username).await;
+    if let Some(idx) = state.take_running_vm(username).await {
+        if let Err(e) = orchestrator::teardown(state, idx, username).await {
+            // Teardown lỗi → giữ tracking, KHÔNG xóa profile khi VM còn sống.
+            state.set_running_profile(username, idx).await;
+            return Err(e);
+        }
     }
     state.delete_profile(username).await;
     Ok(())
@@ -259,6 +309,42 @@ mod tests {
             state.running_vm_of("acc_cap").await.is_none(),
             "profile bị cap KHÔNG được đăng ký running"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_cap_nguyen_tu_duoi_dua_tranh() {
+        // Đua tranh: 8 profile chạy SONG SONG → cổng tối đa 5 phải giữ nguyên tử
+        // (không TOCTOU cho 6+ VM qua). Đúng 5 thành công, 3 bị chặn.
+        let state = make_state("race", Arc::new(MockGeolocator));
+        // APK giả (tồn tại) để qua fail-fast; provision mock không đọc nội dung.
+        let apk = std::env::temp_dir().join(format!("mpm_fake_{}.apk", std::process::id()));
+        std::fs::write(&apk, b"x").unwrap();
+        state.settings.lock().await.tiktok_apk_path = Some(apk.to_string_lossy().to_string());
+        for i in 0..8 {
+            create(&state, acc(&format!("p{i}")), None, None).await.unwrap();
+        }
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let s = state.clone();
+            let name = format!("p{i}");
+            handles.push(tokio::spawn(async move { run(&s, &name).await }));
+        }
+        let (mut ok, mut capped) = (0, 0);
+        for h in handles {
+            match h.await.unwrap() {
+                Ok(_) => ok += 1,
+                Err(AppError::InvalidInput(m)) if m.contains("tối đa") => capped += 1,
+                other => panic!("kết quả bất ngờ: {other:?}"),
+            }
+        }
+        assert_eq!(ok, MAX_RUNNING_VMS, "đúng {MAX_RUNNING_VMS} chạy được");
+        assert_eq!(capped, 8 - MAX_RUNNING_VMS, "phần còn lại bị cổng chặn");
+        assert_eq!(
+            state.running_profiles.lock().await.len(),
+            MAX_RUNNING_VMS,
+            "map running không vượt cổng"
+        );
+        let _ = std::fs::remove_file(&apk);
     }
 
     #[tokio::test]

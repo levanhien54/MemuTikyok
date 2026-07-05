@@ -93,8 +93,9 @@ pub async fn backup_and_record(
     let adb_meta = state.adb.backup(index, TIKTOK_PKG, &tmp).await?;
     // 2) Nén + lưu nguyên tử; sha256/size là của blob ĐÃ NÉN (toàn vẹn + dung lượng thật).
     let storage_key = format!("{account_key}/{created}.tar.zst");
-    let stored = state.store.put(&storage_key, &tmp).await?;
-    let _ = std::fs::remove_file(&tmp);
+    let put = state.store.put(&storage_key, &tmp).await;
+    let _ = std::fs::remove_file(&tmp); // dọn tmp MỌI nhánh (kể cả put lỗi → không rò .tar)
+    let stored = put?;
 
     // 3) Ghi CSDL + retention (dọn blob cũ vượt hạn mức).
     if let Some(db) = &state.db {
@@ -186,9 +187,14 @@ async fn provision_prepare(
             if state.store.verify(&rec.storage_key, &rec.sha256).await? {
                 let tmp =
                     std::env::temp_dir().join(format!("mpm-prov-{index}-{}.tar.zst", now_ms()));
-                state.store.get(&rec.storage_key, &tmp).await?;
-                state.adb.restore(index, TIKTOK_PKG, &tmp).await?;
+                // Dọn tmp MỌI nhánh (get/restore lỗi cũng không rò file tạm).
+                let res = async {
+                    state.store.get(&rec.storage_key, &tmp).await?;
+                    state.adb.restore(index, TIKTOK_PKG, &tmp).await
+                }
+                .await;
                 let _ = fs::remove_file(&tmp);
+                res?;
             } else {
                 tracing::warn!(account_key, "Snapshot hỏng — provision không restore");
             }

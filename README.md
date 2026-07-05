@@ -8,7 +8,7 @@
 - Giám sát trạng thái VM theo thời gian thực (polling, nguồn sự thật là `memuc listvms`).
 - Vòng đời VM: start / stop / reboot / tạo / xóa / clone / đổi tên.
 - Thao tác hàng loạt có **kiểm soát tải** (Command Queue giới hạn song song).
-- Cấu hình CPU/RAM/độ phân giải/model/proxy.
+- Cấu hình CPU/RAM/độ phân giải/model.
 - Tìm kiếm, lọc; Dark/Light mode; log viewer.
 
 ## Kiến trúc (tóm tắt)

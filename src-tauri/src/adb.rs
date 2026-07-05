@@ -50,9 +50,15 @@ pub trait AdbWorker: Send + Sync {
     /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop (cần Magisk trong base
     /// image — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool>;
-    /// Tap **GIẢ NGƯỜI**: rung tọa độ + thời gian giữ ngẫu nhiên (chống dò tự động hóa).
+    /// Tap có rung tọa độ + thời gian giữ ngẫu nhiên. ⚠️ HẠN CHẾ THẬT: hiện dùng
+    /// `input swipe pt pt hold` — sự kiện BƠM (injected, không có luồng touch
+    /// DOWN/MOVE/UP thật, không áp lực/kích thước) → VẪN có thể bị phát hiện. Không
+    /// coi đây là "chống dò tự động hóa" hoàn chỉnh (cần sendevent /dev/input — TODO).
     async fn human_tap(&self, idx: u32, x: i32, y: i32) -> AppResult<()>;
-    /// Swipe **GIẢ NGƯỜI**: tọa độ rung + thời lượng ngẫu nhiên (chống touch-jitter check).
+    /// Swipe có rung + thời lượng ngẫu nhiên. ⚠️ HẠN CHẾ THẬT: đường cong Bézier +
+    /// gia tốc do humanize.rs tính bị BỎ, chỉ 2 điểm đầu/cuối đưa vào `input swipe`
+    /// → Android nội suy ĐƯỜNG THẲNG vận tốc tuyến tính (một dấu hiệu bot rõ). Chưa
+    /// đạt "chống touch-jitter check"; cần sendevent phát lại toàn đường (TODO).
     async fn human_swipe(&self, idx: u32, x0: i32, y0: i32, x1: i32, y1: i32) -> AppResult<()>;
 }
 
@@ -231,6 +237,13 @@ impl AdbWorker for RealAdbWorker {
         // ⚠️ THỬ LẠI: ngay sau khi provision boot + áp android_id/debloat/harden, kết nối
         //    adb hay bị "failed to read copy response" (rớt lúc commit dù push xong 230MB).
         //    Đây là lỗi CHỚP NHOÁNG — thử lại vài lần (chờ VM lắng) là ăn (kiểm chứng thực).
+        // Chống inject vào chuỗi shell: apk_path được bọc trong nháy kép, nên một ký tự
+        // nháy/metachar có thể thoát nháy và chèn token adb/shell khác. Từ chối sớm.
+        if apk_path.contains(['"', '\'', '`', '$', ';', '&', '|', '\n', '\r']) {
+            return Err(AppError::InvalidInput(format!(
+                "Đường dẫn APK chứa ký tự không hợp lệ: {apk_path}"
+            )));
+        }
         let arg = format!("install -r -g --no-streaming \"{apk_path}\"");
         const MAX_TRIES: u32 = 3;
         let mut last = String::new();

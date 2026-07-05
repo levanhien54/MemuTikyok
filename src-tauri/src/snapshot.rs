@@ -74,7 +74,16 @@ impl LocalSnapshotStore {
     }
 
     fn key_path(&self, key: &str) -> PathBuf {
-        self.root.join(key)
+        // Phòng thủ TẦNG (username đã validate ở profile_ops; đây là lớp 2): chỉ ghép
+        // các thành phần Normal — bỏ '..'/'.'/đường-dẫn-tuyệt-đối/ổ-đĩa — nên đường dẫn
+        // kết quả LUÔN nằm trong `root`, không thể traversal ra ngoài.
+        let mut p = self.root.clone();
+        for comp in Path::new(key).components() {
+            if let std::path::Component::Normal(seg) = comp {
+                p.push(seg);
+            }
+        }
+        p
     }
 }
 
