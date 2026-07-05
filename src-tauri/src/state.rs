@@ -62,8 +62,9 @@ pub struct AppState {
     /// PROFILE (dữ liệu bền, khóa theo username) — tách khỏi vm_index. Nguồn sự thật
     /// cho danh sách tài khoản; VM chỉ là pool tạm để chạy profile.
     pub profiles: Mutex<HashMap<String, Profile>>,
-    /// Ánh xạ profile ĐANG CHẠY → vm_index (bộ nhớ, không persist).
-    pub running_profiles: Mutex<HashMap<String, u32>>,
+    /// Ánh xạ profile ĐANG CHẠY → vm_index (bộ nhớ, không persist). Dùng **std Mutex**
+    /// (không giữ qua await ở đâu cả) để RAII guard nhả chỗ được TRONG Drop (đồng bộ).
+    pub running_profiles: std::sync::Mutex<HashMap<String, u32>>,
 }
 
 impl AppState {
@@ -98,7 +99,7 @@ impl AppState {
             create_lock: Mutex::new(()),
             running_sessions: Mutex::new(HashSet::new()),
             profiles: Mutex::new(profiles),
-            running_profiles: Mutex::new(HashMap::new()),
+            running_profiles: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,7 +127,7 @@ impl AppState {
 
     pub async fn delete_profile(&self, username: &str) {
         self.profiles.lock().await.remove(username);
-        self.running_profiles.lock().await.remove(username);
+        self.running_profiles.lock().unwrap().remove(username);
         if let Some(db) = &self.db {
             let _ = db.delete_profile(username);
         }
@@ -137,21 +138,27 @@ impl AppState {
     pub async fn running_vm_of(&self, username: &str) -> Option<u32> {
         self.running_profiles
             .lock()
-            .await
+            .unwrap()
             .get(username)
             .copied()
             .filter(|&v| v != RESERVED_VM)
     }
 
+    /// True nếu profile đang GIỮA giai đoạn provision (đã đặt chỗ `RESERVED_VM`, VM thật
+    /// chưa xong). Dùng để `stop`/`delete` từ chối thao tác khi run đang bay.
+    pub async fn is_reserved(&self, username: &str) -> bool {
+        self.running_profiles.lock().unwrap().get(username).copied() == Some(RESERVED_VM)
+    }
+
     pub async fn set_running_profile(&self, username: &str, vm_index: u32) {
         self.running_profiles
             .lock()
-            .await
+            .unwrap()
             .insert(username.to_string(), vm_index);
     }
 
     pub async fn clear_running_profile(&self, username: &str) {
-        self.running_profiles.lock().await.remove(username);
+        self.running_profiles.lock().unwrap().remove(username);
     }
 
     /// NGUYÊN TỬ: kiểm idempotency + cổng tối đa RỒI đặt chỗ slot — tất cả dưới MỘT
@@ -159,7 +166,7 @@ impl AppState {
     /// không provision đôi. Caller nhận `Reserved` phải finalize bằng `set_running_profile`
     /// (thành công) hoặc `clear_running_profile` (lỗi) để nhả chỗ.
     pub async fn reserve_run_slot(&self, username: &str, max: usize) -> RunSlot {
-        let mut g = self.running_profiles.lock().await;
+        let mut g = self.running_profiles.lock().unwrap();
         match g.get(username).copied() {
             Some(v) if v != RESERVED_VM => return RunSlot::AlreadyRunning(v),
             Some(_) => return RunSlot::Pending,
@@ -175,7 +182,7 @@ impl AppState {
     /// NGUYÊN TỬ lấy-và-xóa vm_index đang chạy (bỏ qua slot đặt chỗ). Chỉ MỘT caller
     /// thắng entry → chống teardown đôi khi hai `stop`/`delete` chạy song song.
     pub async fn take_running_vm(&self, username: &str) -> Option<u32> {
-        let mut g = self.running_profiles.lock().await;
+        let mut g = self.running_profiles.lock().unwrap();
         match g.get(username).copied() {
             Some(v) if v != RESERVED_VM => {
                 g.remove(username);
@@ -204,13 +211,18 @@ impl AppState {
         self.persist(index, &entry);
     }
 
-    /// Lấy fingerprint đã lưu của một VM (để áp lại khi khởi chạy).
-    pub async fn hardware_of(&self, index: u32) -> Option<HardwareProfile> {
-        self.metadata
-            .lock()
-            .await
-            .get(&index)
-            .and_then(|m| m.hardware.clone())
+    /// PROFILE đang chạy trên VM `idx` (tra ngược `running_profiles` → `get_profile`).
+    /// Dùng để automation lấy độ phân giải THẬT của profile (mô hình profile không ghi
+    /// InstanceMeta.hardware per-index nữa nên phải tra qua profile).
+    pub async fn profile_on_vm(&self, idx: u32) -> Option<Profile> {
+        let username = {
+            let g = self.running_profiles.lock().unwrap();
+            g.iter().find(|(_, &v)| v == idx).map(|(u, _)| u.clone())
+        };
+        match username {
+            Some(u) => self.get_profile(&u).await,
+            None => None,
+        }
     }
 
     pub async fn forget(&self, index: u32) {

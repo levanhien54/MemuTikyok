@@ -7,10 +7,47 @@
 use crate::error::{AppError, AppResult};
 use crate::model::{AccountProfile, Profile, ProfileView, SnapshotRecord, DEFAULT_TIKTOK_APK, TIKTOK_PKG};
 use crate::orchestrator;
-use crate::state::{now_ms, RunSlot, SharedState};
+use crate::state::{now_ms, RunSlot, SharedState, RESERVED_VM};
 
 /// Số VM chạy đồng thời tối đa (kế hoạch §18: tối đa ~5 VM).
 pub const MAX_RUNNING_VMS: usize = 5;
+
+/// Guard RAII cho slot đã đặt chỗ (`RESERVED_VM`): nếu KHÔNG `commit()` — do lỗi, `?`
+/// thoát sớm, panic, hay task bị hủy giữa provision — thì `Drop` tự NHẢ chỗ. Nhờ
+/// `running_profiles` là std Mutex nên khóa được đồng bộ trong Drop. Chỉ xóa khi entry
+/// VẪN là RESERVED (không đụng idx thật đã set hay entry của caller khác).
+struct RunReservation<'a> {
+    state: &'a SharedState,
+    username: String,
+    committed: bool,
+}
+
+impl<'a> RunReservation<'a> {
+    fn new(state: &'a SharedState, username: &str) -> Self {
+        Self {
+            state,
+            username: username.to_string(),
+            committed: false,
+        }
+    }
+    /// Giữ chỗ (đã set idx thật) — Drop sẽ không nhả.
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for RunReservation<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Ok(mut g) = self.state.running_profiles.lock() {
+            if g.get(&self.username).copied() == Some(RESERVED_VM) {
+                g.remove(&self.username);
+            }
+        }
+    }
+}
 
 /// Kiểm tra tên profile — dùng ĐỒNG THỜI làm PRIMARY KEY (SQLite), KHÓA SNAPSHOT
 /// (đường dẫn hệ tệp) và tham số shell. Whitelist NGHIÊM: `[A-Za-z0-9._-]`, ≤64 ký tự,
@@ -85,13 +122,40 @@ pub async fn create(
 }
 
 /// Danh sách profile + trạng thái runtime (đang chạy trên VM nào).
+///
+/// RECONCILE với nguồn-sự-thật memuc: VM có thể chết NGOÀI luồng app (đóng MEmu, crash,
+/// reboot dịch vụ). Nếu vm_index không còn trong `listvms` → nhả tracking + hiện "nghỉ".
+/// Chỉ tra memuc khi CÓ profile đang chạy (khỏi tốn lệnh CLI lúc rảnh) và chỉ dọn khi
+/// listvms THÀNH CÔNG (lỗi tạm thời không được xóa nhầm trạng thái).
 pub async fn list(state: &SharedState) -> Vec<ProfileView> {
-    let mut views = Vec::new();
+    let mut raw: Vec<(Profile, Option<u32>)> = Vec::new();
+    let mut has_running = false;
     for p in state.list_profiles().await {
-        let running_vm = state.running_vm_of(&p.username).await;
+        let vm = state.running_vm_of(&p.username).await;
+        has_running |= vm.is_some();
+        raw.push((p, vm));
+    }
+    let live: Option<std::collections::HashSet<u32>> = if has_running {
+        state
+            .memuc
+            .list_instances()
+            .await
+            .ok()
+            .map(|v| v.into_iter().map(|i| i.index).collect())
+    } else {
+        None
+    };
+    let mut views = Vec::with_capacity(raw.len());
+    for (p, mut vm) in raw {
+        if let (Some(idx), Some(live)) = (vm, &live) {
+            if !live.contains(&idx) {
+                state.clear_running_profile(&p.username).await;
+                vm = None;
+            }
+        }
         views.push(ProfileView {
             profile: p,
-            running_vm,
+            running_vm: vm,
         });
     }
     views
@@ -164,34 +228,53 @@ pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
         }
         RunSlot::Reserved => {}
     }
-    // Từ đây đã giữ chỗ → mọi nhánh thoát PHẢI nhả chỗ (clear_running_profile).
+    // Đã giữ chỗ RESERVED. Guard RAII nhả chỗ nếu KHÔNG commit (mọi nhánh thoát bất
+    // thường: lỗi, `?`, panic, hủy task) → không rò slot cổng tối đa.
+    let reservation = RunReservation::new(state, username);
+
     // APK fail-fast: kiểm tra tồn tại TRƯỚC khi tốn công tạo/boot VM.
     let apk = apk_path(state).await;
     if !std::path::Path::new(&apk).exists() {
-        state.clear_running_profile(username).await;
         return Err(AppError::InvalidInput(format!(
             "Không tìm thấy APK TikTok tại: {apk} — vào Cài đặt đặt 'Đường dẫn APK TikTok'"
-        )));
+        ))); // reservation.drop() → nhả chỗ
     }
-    // Provision (ngoài khóa — thao tác dài). Lỗi → NHẢ chỗ đã đặt.
-    let idx = match orchestrator::provision(state, username, &profile.hardware, Some(&apk)).await {
-        Ok(i) => i,
-        Err(e) => {
-            state.clear_running_profile(username).await;
-            return Err(e);
-        }
-    };
+    // Provision (ngoài khóa — thao tác dài). Lỗi → `?` thoát → reservation.drop() nhả chỗ.
+    let idx = orchestrator::provision(state, username, &profile.hardware, Some(&apk)).await?;
     let _ = state.adb.start_app(idx, TIKTOK_PKG).await;
-    state.set_running_profile(username, idx).await; // ghi đè RESERVED bằng idx thật
-    let mut p = profile;
-    p.last_run_at = Some(now_ms());
-    state.upsert_profile(p).await;
-    Ok(idx)
+    // Re-fetch: `provision` là thao tác DÀI, KHÔNG giữ khóa profiles → profile có thể đã
+    // bị SỬA hoặc XÓA trong lúc đó. Ghi lại bằng snapshot `profile` cũ sẽ clobber bản sửa
+    // hoặc hồi sinh bản đã xóa. Nên đọc lại bản HIỆN TẠI trước khi finalize.
+    match state.get_profile(username).await {
+        Some(mut p) => {
+            p.last_run_at = Some(now_ms());
+            state.upsert_profile(p).await; // ghi bản hiện tại + last_run_at (không clobber)
+            state.set_running_profile(username, idx).await; // RESERVED → idx thật
+            reservation.commit(); // giữ entry idx — Drop không nhả
+            Ok(idx)
+        }
+        None => {
+            // Profile bị XÓA giữa chừng → HỦY VM vừa cấp (khỏi backup — profile đã mất).
+            // reservation.drop() nhả chỗ RESERVED (nếu còn). Không mồ côi VM, không hồi sinh.
+            let _ = state.memuc.stop(idx).await;
+            let _ = state.memuc.remove(idx).await;
+            state.forget(idx).await;
+            Err(AppError::InvalidInput(
+                "Profile đã bị xóa trong lúc khởi chạy — đã hủy VM vừa cấp".into(),
+            ))
+        }
+    }
 }
 
 /// DỪNG profile: backup session → HỦY VM (disposable) → nhả running map. Trả
 /// snapshot record nếu đang chạy; `None` nếu profile không chạy (idempotent).
 pub async fn stop(state: &SharedState, username: &str) -> AppResult<Option<SnapshotRecord>> {
+    // Đang provision (RESERVED) → từ chối: chưa có VM thật để dừng.
+    if state.is_reserved(username).await {
+        return Err(AppError::InvalidInput(
+            "Profile đang khởi chạy — vui lòng đợi rồi thử lại".into(),
+        ));
+    }
     // Lấy-và-xóa NGUYÊN TỬ (chỉ một caller thắng entry → chống teardown đôi).
     let Some(idx) = state.take_running_vm(username).await else {
         return Ok(None);
@@ -199,7 +282,7 @@ pub async fn stop(state: &SharedState, username: &str) -> AppResult<Option<Snaps
     match orchestrator::teardown(state, idx, username).await {
         Ok(rec) => Ok(Some(rec)),
         // Teardown lỗi (vd backup fail) → TÁI theo dõi để retry, KHÔNG bỏ VM khỏi map
-        // (nếu bỏ, VM còn chạy nhưng vô chủ, không tính vào cổng, không ai dọn).
+        // (nếu bỏ, VM còn chạy nhưng vô chủ). Muốn bỏ hẳn dù backup lỗi → dùng Xóa.
         Err(e) => {
             state.set_running_profile(username, idx).await;
             Err(e)
@@ -207,13 +290,22 @@ pub async fn stop(state: &SharedState, username: &str) -> AppResult<Option<Snaps
     }
 }
 
-/// XÓA profile: nếu đang chạy thì teardown trước (backup + hủy VM), rồi xóa bản ghi.
+/// XÓA profile: người dùng CHỦ ĐÍCH bỏ → cố backup nhưng KHÔNG chặn xóa nếu backup lỗi
+/// (force hủy VM). Đây là lối thoát khi một phiên có dữ liệu không backup được.
 pub async fn delete(state: &SharedState, username: &str) -> AppResult<()> {
+    // Đang provision (RESERVED) → từ chối: đợi run xong đã (tránh xóa lúc đang cấp VM).
+    if state.is_reserved(username).await {
+        return Err(AppError::InvalidInput(
+            "Profile đang khởi chạy — vui lòng đợi rồi xóa".into(),
+        ));
+    }
     if let Some(idx) = state.take_running_vm(username).await {
         if let Err(e) = orchestrator::teardown(state, idx, username).await {
-            // Teardown lỗi → giữ tracking, KHÔNG xóa profile khi VM còn sống.
-            state.set_running_profile(username, idx).await;
-            return Err(e);
+            // Backup khi xóa lỗi → VẪN hủy VM + xóa profile (force), không để kẹt.
+            tracing::warn!(username, error = %e, "backup khi xóa lỗi — force hủy VM + xóa");
+            let _ = state.memuc.stop(idx).await;
+            let _ = state.memuc.remove(idx).await;
+            state.forget(idx).await;
         }
     }
     state.delete_profile(username).await;
@@ -342,7 +434,7 @@ mod tests {
         assert_eq!(ok, MAX_RUNNING_VMS, "đúng {MAX_RUNNING_VMS} chạy được");
         assert_eq!(capped, 8 - MAX_RUNNING_VMS, "phần còn lại bị cổng chặn");
         assert_eq!(
-            state.running_profiles.lock().await.len(),
+            state.running_profiles.lock().unwrap().len(),
             MAX_RUNNING_VMS,
             "map running không vượt cổng"
         );
@@ -379,5 +471,22 @@ mod tests {
         let state = make_state("stop", Arc::new(MockGeolocator));
         create(&state, acc("acc_s"), None, None).await.unwrap();
         assert!(stop(&state, "acc_s").await.unwrap().is_none(), "không chạy → None");
+    }
+
+    #[tokio::test]
+    async fn run_loi_apk_guard_nha_cho_dat_truoc() {
+        // run() lỗi ở fail-fast APK (sau khi đã đặt chỗ) → RAII guard PHẢI nhả chỗ
+        // RESERVED, không rò slot cổng tối đa.
+        let state = make_state("apkfail", Arc::new(MockGeolocator));
+        create(&state, acc("acc_x"), None, None).await.unwrap();
+        state.settings.lock().await.tiktok_apk_path = Some("Z:/khong/ton/tai.apk".into());
+        let r = run(&state, "acc_x").await;
+        assert!(matches!(r, Err(AppError::InvalidInput(_))), "APK thiếu → lỗi");
+        assert!(!state.is_reserved("acc_x").await, "guard phải nhả RESERVED");
+        assert_eq!(
+            state.running_profiles.lock().unwrap().len(),
+            0,
+            "không rò slot sau lỗi"
+        );
     }
 }

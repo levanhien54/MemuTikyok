@@ -110,11 +110,12 @@ async fn run_session_inner(
     idx: u32,
     cfg: WatchConfig,
 ) -> AppResult<SessionReport> {
-    // Kích thước màn hình từ fingerprint đã lưu (khớp độ phân giải đã inject); fallback 1080x1920.
+    // Kích thước màn hình từ fingerprint CỦA PROFILE đang chạy trên VM này (khớp độ phân
+    // giải đã inject khi provision); fallback 1080x1920 nếu không tra được profile.
     let (w, h) = state
-        .hardware_of(idx)
+        .profile_on_vm(idx)
         .await
-        .map(|hw| (hw.res_width as i32, hw.res_height as i32))
+        .map(|p| (p.hardware.res_width as i32, p.hardware.res_height as i32))
         .unwrap_or((1080, 1920));
     let (cx, cy) = (w / 2, h / 2);
 
