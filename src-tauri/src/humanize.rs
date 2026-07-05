@@ -34,7 +34,7 @@ impl Rng {
     }
 
     /// f64 trong [0, 1).
-    fn f(&mut self) -> f64 {
+    pub fn f(&mut self) -> f64 {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
@@ -44,9 +44,15 @@ impl Rng {
     }
 
     /// i32 trong [a, b] (bao gồm hai đầu).
-    fn irange(&mut self, a: i32, b: i32) -> i32 {
+    pub fn irange(&mut self, a: i32, b: i32) -> i32 {
         debug_assert!(b >= a);
         a + (self.next_u64() % ((b - a + 1) as u64)) as i32
+    }
+
+    /// u64 trong [a, b] (bao gồm hai đầu).
+    pub fn urange(&mut self, a: u64, b: u64) -> u64 {
+        debug_assert!(b >= a);
+        a + self.next_u64() % (b - a + 1)
     }
 }
 
@@ -118,8 +124,6 @@ pub fn human_swipe(from: (i32, i32), to: (i32, i32), rng: &mut Rng) -> Vec<Touch
 }
 
 /// Nhịp chờ giữa các hành động (xem/đọc) kiểu người: quanh `base` ms, biến thiên ±40%.
-/// Dành cho automation runner (chưa nối) — giữ trong bộ công cụ humanize.
-#[allow(dead_code)]
 pub fn human_delay_ms(base: u64, rng: &mut Rng) -> u64 {
     let lo = (base as f64 * 0.6) as i32;
     let hi = (base as f64 * 1.4) as i32;

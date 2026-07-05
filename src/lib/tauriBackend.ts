@@ -11,6 +11,7 @@ import type {
   HardwareProfile,
   EmulatorTell,
   InstancesUpdateEvent,
+  SessionReport,
 } from '@/types/instance';
 
 /**
@@ -94,6 +95,19 @@ export function createTauriBackend(): Backend {
     },
     teardownSession(index, accountKey) {
       return invoke<SnapshotRecord>('teardown_session', { index, accountKey });
+    },
+    runWatchSession(index) {
+      return invoke<void>('run_watch_session', { index });
+    },
+    subscribeAutomation(onDone, onError) {
+      const pDone = listen<SessionReport>('automation:done', (e) => onDone(e.payload));
+      const pErr = listen<{ index: number; error: string }>('automation:error', (e) =>
+        onError(e.payload.index, e.payload.error),
+      );
+      return () => {
+        void pDone.then((u) => u());
+        void pErr.then((u) => u());
+      };
     },
     subscribeInstances(cb) {
       const unlistenPromise = listen<InstancesUpdateEvent>('instances:update', (event) => {

@@ -8,6 +8,7 @@ import type {
   CreateInstancePayload,
   SnapshotRecord,
   HardwareProfile,
+  SessionReport,
 } from '@/types/instance';
 
 /** Sinh fingerprint mô phỏng, tất định theo tên tài khoản (cho UI demo). */
@@ -146,6 +147,8 @@ export function createMockBackend(): Backend {
   const meta = loadMeta();
   let settings = { ...DEFAULT_SETTINGS };
   const listeners = new Set<(i: Instance[]) => void>();
+  const autoDone = new Set<(r: SessionReport) => void>();
+  const autoError = new Set<(index: number, message: string) => void>();
 
   const patchMeta = (index: number, patch: Partial<MetaEntry>) => {
     const prev: MetaEntry = meta[index] ?? {
@@ -380,6 +383,23 @@ export function createMockBackend(): Backend {
     async saveSettings(next) {
       settings = { ...next };
       return { ...settings };
+    },
+    async runWatchSession(index: number) {
+      // Mô phỏng: sau ~1.5s phát báo cáo phiên (bản thật chạy nền vài phút).
+      const videos = 5 + Math.floor(Math.random() * 8);
+      const liked = Math.floor(videos * 0.12);
+      setTimeout(() => {
+        const report: SessionReport = { index, videos, liked, durationMs: videos * 9000 };
+        autoDone.forEach((cb) => cb(report));
+      }, 1500);
+    },
+    subscribeAutomation(onDone, onError) {
+      autoDone.add(onDone);
+      autoError.add(onError);
+      return () => {
+        autoDone.delete(onDone);
+        autoError.delete(onError);
+      };
     },
     subscribeInstances(cb) {
       listeners.add(cb);

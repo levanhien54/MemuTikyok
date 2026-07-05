@@ -9,6 +9,7 @@ import type {
   EmulatorTell,
 } from '@/types/instance';
 import { getBackend } from '@/lib';
+import { toast } from '@/store/useToastStore';
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -47,6 +48,8 @@ interface InstanceState {
   scanEmulator: (index: number) => Promise<EmulatorTell[]>;
   rename: (index: number, title: string) => Promise<void>;
   bulk: (op: BulkOperation) => Promise<void>;
+  /** Chạy phiên "xem feed" giả người ở nền; kết quả toast qua sự kiện automation. */
+  runWatchSession: (index: number) => Promise<void>;
 }
 
 export const useInstanceStore = create<InstanceState>((set, get) => ({
@@ -69,10 +72,23 @@ export const useInstanceStore = create<InstanceState>((set, get) => ({
       );
 
     // Luồng cập nhật realtime (polling ở backend đẩy qua đây)
-    const unsubscribe = backend.subscribeInstances((instances) =>
+    const unsubInstances = backend.subscribeInstances((instances) =>
       set({ instances, loadState: 'ready' }),
     );
-    return unsubscribe;
+    // Kết quả phiên automation → toast.
+    const unsubAuto = backend.subscribeAutomation(
+      (r) =>
+        toast.success(
+          `Phiên xem xong VM #${r.index}: ${r.videos} video, ${r.liked} like (${Math.round(
+            r.durationMs / 1000,
+          )}s)`,
+        ),
+      (index, message) => toast.error(`Phiên VM #${index} lỗi: ${message}`),
+    );
+    return () => {
+      unsubInstances();
+      unsubAuto();
+    };
   },
 
   async refresh() {
@@ -153,5 +169,8 @@ export const useInstanceStore = create<InstanceState>((set, get) => ({
     const indexes = [...get().selected];
     if (indexes.length === 0) return;
     await getBackend().bulkAction(op, indexes);
+  },
+  async runWatchSession(index) {
+    await getBackend().runWatchSession(index);
   },
 }));

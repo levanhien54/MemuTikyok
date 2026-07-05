@@ -7,6 +7,7 @@ import type {
   SnapshotRecord,
   HardwareProfile,
   EmulatorTell,
+  SessionReport,
 } from '@/types/instance';
 
 /**
@@ -63,6 +64,15 @@ export interface Backend {
   swapAccount(index: number, accountKey: string, hardware: HardwareProfile): Promise<void>;
   /** Kết thúc phiên: backup session rồi hủy VM (disposable). Trả về snapshot vừa backup. */
   teardownSession(index: number, accountKey: string): Promise<SnapshotRecord>;
+
+  // ── Automation (warm-up "xem feed" giả người) ──
+  /** Chạy phiên xem TikTok giả-người ở NỀN cho VM. Kết quả về qua subscribeAutomation. */
+  runWatchSession(index: number): Promise<void>;
+  /** Đăng ký nhận kết quả phiên automation (done/error). Trả về hàm hủy. */
+  subscribeAutomation(
+    onDone: (report: SessionReport) => void,
+    onError: (index: number, message: string) => void,
+  ): () => void;
 
   /** Đăng ký nhận cập nhật danh sách theo thời gian thực. Trả về hàm hủy đăng ký. */
   subscribeInstances(cb: (instances: Instance[]) => void): () => void;

@@ -10,6 +10,7 @@ import {
   Download,
   ShieldCheck,
   Pencil,
+  Bot,
 } from 'lucide-react';
 import type { Instance } from '@/types/instance';
 import { StatusBadge } from '@/components/ui/StatusBadge';
@@ -33,6 +34,7 @@ interface Props {
   onUpdateNote: (index: number, note: string) => void;
   onUpdateCountry: (index: number, country: string | null) => void;
   onEdit: (instance: Instance) => void;
+  onRunSession: (instance: Instance) => void;
   onViewFingerprint: (instance: Instance) => void;
   onInstallTiktok: (instance: Instance) => void;
   onScanEmulator: (instance: Instance) => void;
@@ -56,6 +58,7 @@ function InstanceRowImpl({
   onUpdateNote,
   onUpdateCountry,
   onEdit,
+  onRunSession,
   onViewFingerprint,
   onInstallTiktok,
   onScanEmulator,
@@ -94,6 +97,12 @@ function InstanceRowImpl({
     icon: <Download size={15} />,
     onClick: () => onInstallTiktok(instance),
     disabled: isPending,
+  });
+  menuItems.push({
+    label: 'Chạy phiên xem (giả người)',
+    icon: <Bot size={15} />,
+    onClick: () => onRunSession(instance),
+    disabled: !isRunning,
   });
   menuItems.push({
     label: 'Backup dữ liệu',

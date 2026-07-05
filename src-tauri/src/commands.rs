@@ -1,7 +1,7 @@
 //! Tauri commands — biên giới IPC được UI gọi qua `invoke` (§8.4 SRS).
 //! Lệnh thao tác đi qua Command Queue để kiểm soát tải (§8.3).
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::error::{AppError, AppResult};
 use crate::model::{
@@ -330,6 +330,33 @@ pub async fn human_swipe(
     state: State<'_, SharedState>,
 ) -> AppResult<()> {
     state.adb.human_swipe(index, x0, y0, x1, y1).await
+}
+
+/// Chạy phiên "xem feed" TikTok GIẢ NGƯỜI ở NỀN (warm-up). Trả ngay; khi xong phát
+/// sự kiện `automation:done` (SessionReport) hoặc `automation:error`.
+#[tauri::command]
+pub async fn run_watch_session(
+    index: u32,
+    config: Option<crate::runner::WatchConfig>,
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> AppResult<()> {
+    let st = state.inner().clone();
+    let cfg = config.unwrap_or_default();
+    tauri::async_runtime::spawn(async move {
+        match crate::runner::run_watch_session(&st, index, cfg).await {
+            Ok(rep) => {
+                let _ = app.emit("automation:done", rep);
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "automation:error",
+                    serde_json::json!({ "index": index, "error": e.to_string() }),
+                );
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Lấy fingerprint (đã lưu DB) của một VM để hiển thị.

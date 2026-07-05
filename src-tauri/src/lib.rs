@@ -16,6 +16,7 @@ mod model;
 mod orchestrator;
 mod poller;
 mod queue;
+mod runner;
 mod snapshot;
 mod state;
 
@@ -230,6 +231,7 @@ pub fn run() {
             commands::harden_vm,
             commands::human_tap,
             commands::human_swipe,
+            commands::run_watch_session,
             commands::get_hardware,
             commands::remove_instance,
             commands::rename_instance,

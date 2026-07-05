@@ -87,6 +87,14 @@ export interface SnapshotRecord {
   createdAt: number;
 }
 
+/** Báo cáo một phiên automation "xem feed" giả người. */
+export interface SessionReport {
+  index: number;
+  videos: number;
+  liked: number;
+  durationMs: number;
+}
+
 export type BulkOperation = 'start' | 'stop' | 'reboot';
 
 export interface ActionProgress {

@@ -46,6 +46,7 @@ export function InstancesView() {
     getHardware,
     installTiktok,
     scanEmulator,
+    runWatchSession,
   } = useInstanceStore();
 
   const [pendingDelete, setPendingDelete] = useState<Instance | null>(null);
@@ -109,6 +110,14 @@ export function InstancesView() {
         }
       })
       .catch((e: unknown) => toast.error(`Scan lỗi: ${e instanceof Error ? e.message : e}`));
+  };
+
+  const doRunSession = (instance: Instance) => {
+    const name = instance.account?.tiktokUsername || instance.title;
+    toast.info(`Bắt đầu phiên xem giả người "${name}"… (chạy nền)`);
+    void runWatchSession(instance.index).catch((e: unknown) =>
+      toast.error(`Không bắt đầu được phiên: ${e instanceof Error ? e.message : e}`),
+    );
   };
 
   const doInstallTiktok = (instance: Instance) => {
@@ -220,6 +229,7 @@ export function InstancesView() {
                   onUpdateNote={(i, note) => void updateNote(i, note)}
                   onUpdateCountry={(i, country) => void updateCountry(i, country)}
                   onEdit={(inst) => setEditInstance(inst)}
+                  onRunSession={(inst) => doRunSession(inst)}
                   onBackup={doBackup}
                   onRestore={doRestore}
                   onViewFingerprint={doViewFingerprint}
