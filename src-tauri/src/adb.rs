@@ -41,10 +41,14 @@ pub trait AdbWorker: Send + Sync {
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>>;
     /// Ẩn/sửa các dấu vết SỬA ĐƯỢC (best-effort; ro.* cần reboot mới ăn).
     async fn harden(&self, idx: u32) -> AppResult<()>;
+    /// Đẩy binary `magisk` (chứa applet resetprop, trích từ Magisk APK) vào VM tại
+    /// `/data/local/tmp/magisk` + chmod + verify (`magisk -c`). VM đã có root (enable_su)
+    /// nên KHÔNG cần cài Magisk hệ thống. Trả `Ok(true)` nếu binary chạy được.
+    async fn push_resetprop(&self, idx: u32, local_bin: &str) -> AppResult<bool>;
     /// KHÓA định danh thiết bị (ro.product.model/brand/manufacturer/device +
     /// ro.build.fingerprint) SAU boot bằng **resetprop** — chống MEmu random model.
-    /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop (cần Magisk trong base
-    /// image — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
+    /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop/magisk (đặt Magisk APK trong
+    /// Cài đặt — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool>;
     /// Tap có rung tọa độ + thời gian giữ ngẫu nhiên. ⚠️ HẠN CHẾ THẬT: hiện dùng
     /// `input swipe pt pt hold` — sự kiện BƠM (injected, không có luồng touch
@@ -95,7 +99,9 @@ impl RealAdbWorker {
         Ok(output.stdout)
     }
 
-    /// getprop sạch nhiễu "already connected" của memuc adb.
+    /// getprop sạch nhiễu memuc adb. `getprop <name>` cho DÚNG MỘT dòng giá trị; mọi nhiễu
+    /// ("already connected", "daemon started"...) memuc chèn nằm TRƯỚC → lấy dòng SẠCH CUỐI
+    /// cùng. KHÔNG join tất cả (nhiễu sẽ dính vào value → verify sai — finding resolve-logic).
     async fn prop(&self, idx: u32, name: &str) -> String {
         let out = self
             .adb(idx, &format!("shell getprop {name}"))
@@ -104,9 +110,9 @@ impl RealAdbWorker {
         String::from_utf8_lossy(&out)
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.contains("already connected"))
-            .collect::<Vec<_>>()
-            .join("")
+            .rfind(|l| !l.is_empty() && !l.contains("already connected"))
+            .unwrap_or("")
+            .to_string()
     }
 }
 
@@ -372,13 +378,15 @@ impl AdbWorker for RealAdbWorker {
             detail: bc,
         });
 
-        // Base image sẵn-sàng-Magisk? resetprop có → khóa được ro.product.model/android_id
-        // (chống MEmu random model). KHÔNG có → model bị ghi đè, fingerprint coherent lệch.
+        // Có resetprop? → khóa được ro.product.model/android_id (chống MEmu random model).
+        // KHÔNG có → model bị ghi đè, fingerprint coherent lệch. Kiểm CẢ binary magisk MPM
+        // đẩy vào (/data/local/tmp/magisk) LẪN resetprop standalone (Magisk hệ thống).
+        let vm = crate::magisk::VM_MAGISK_PATH;
         let rp = String::from_utf8_lossy(
             &self
                 .adb(
                     idx,
-                    "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo yes && break; done'",
+                    &format!("shell su -c '([ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo yes) || command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo yes && break; done'"),
                 )
                 .await
                 .unwrap_or_default(),
@@ -392,7 +400,7 @@ impl AdbWorker for RealAdbWorker {
             detail: if has_resetprop {
                 "có resetprop — khóa được model/android_id".into()
             } else {
-                "THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)".into()
+                "THIẾU — model bị MEmu ghi đè (đặt Magisk APK trong Cài đặt)".into()
             },
         });
 
@@ -412,31 +420,75 @@ impl AdbWorker for RealAdbWorker {
         Ok(())
     }
 
+    async fn push_resetprop(&self, idx: u32, local_bin: &str) -> AppResult<bool> {
+        let vm = crate::magisk::VM_MAGISK_PATH;
+        // Best-effort: push hỏng chớp nhoáng (device offline) → Ok(false), KHÔNG Err (nhất quán
+        // với chmod/verify tolerant; caller coi đây là no-op chứ không hủy provision).
+        if self
+            .adb(idx, &format!("push \"{local_bin}\" {vm}"))
+            .await
+            .is_err()
+        {
+            tracing::warn!(idx, "Không push được magisk binary vào VM");
+            return Ok(false);
+        }
+        let _ = self.adb(idx, &format!("shell su -c 'chmod 755 {vm}'")).await;
+        // Verify bằng ĐÚNG tiêu chí resolver ở lock_device_identity dùng (`magisk -c` exit 0),
+        // để hai chỗ không bao giờ bất đồng về "binary chạy được không".
+        let v = self
+            .adb(
+                idx,
+                &format!("shell su -c '[ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK'"),
+            )
+            .await
+            .unwrap_or_default();
+        let ok = String::from_utf8_lossy(&v).contains("MOK");
+        if !ok {
+            tracing::warn!(idx, "Đẩy magisk binary nhưng chạy thử (magisk -c) thất bại");
+        }
+        Ok(ok)
+    }
+
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool> {
         if hw.build_fingerprint.is_empty() {
             return Ok(false); // hồ sơ cũ chưa có fingerprint → không có gì để khóa
         }
-        // 1) Tìm resetprop (applet Magisk) ở PATH hoặc các vị trí phổ biến.
-        let probe = self
-            .adb(
-                idx,
-                "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo \"$p\" && break; done'",
-            )
-            .await
-            .unwrap_or_default();
-        let rp = String::from_utf8_lossy(&probe)
-            .lines()
-            .map(str::trim)
-            .rfind(|l| !l.is_empty() && !l.contains("already connected"))
-            .map(|s| s.to_string());
-        let Some(rp) = rp.filter(|s| s == "resetprop" || s.starts_with('/')) else {
+        let vm = crate::magisk::VM_MAGISK_PATH;
+        // Lệnh resetprop: (a) binary magisk MPM đã ĐẨY vào ("<vm> resetprop"), hoặc
+        // (b) resetprop standalone (nếu cài Magisk hệ thống). Không có → no-op.
+        let rp = {
+            let m = self
+                .adb(
+                    idx,
+                    &format!("shell su -c '[ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK'"),
+                )
+                .await
+                .unwrap_or_default();
+            if String::from_utf8_lossy(&m).contains("MOK") {
+                Some(format!("{vm} resetprop"))
+            } else {
+                let probe = self
+                    .adb(
+                        idx,
+                        "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x $p ] && echo $p && break; done'",
+                    )
+                    .await
+                    .unwrap_or_default();
+                String::from_utf8_lossy(&probe)
+                    .lines()
+                    .map(str::trim)
+                    .rfind(|l| !l.is_empty() && !l.contains("already connected"))
+                    .map(|s| s.to_string())
+                    .filter(|s| s == "resetprop" || s.starts_with('/'))
+            }
+        };
+        let Some(rp) = rp else {
             tracing::warn!(
                 idx,
-                "VM chưa có resetprop — bỏ qua khóa model (cần Magisk trong base image)"
+                "VM chưa có resetprop/magisk — bỏ qua khóa model (đặt Magisk APK trong Cài đặt)"
             );
             return Ok(false);
         };
-        // 2) Áp trọn bộ props nhất quán (giá trị bọc nháy kép để chịu khoảng trắng như "Redmi Note 8").
         let props: [(&str, &str); 6] = [
             ("ro.product.model", &hw.model),
             ("ro.product.brand", &hw.brand),
@@ -445,16 +497,58 @@ impl AdbWorker for RealAdbWorker {
             ("ro.product.name", &hw.device),
             ("ro.build.fingerprint", &hw.build_fingerprint),
         ];
+        // KHÔNG chạy từng `su -c 'resetprop KEY "VAL"'`: value CÓ KHOẢNG TRẮNG (vd
+        // "Redmi Note 8") bị adb-shell tách lại qua 3 tầng sh → resetprop nhận 3 tham số,
+        // model KHÔNG khóa (kiểm chứng thực). Thay vào: SINH script, đẩy vào VM, chạy bằng
+        // `sh <file>` — sh đọc nháy kép TỪ FILE nên value giữ nguyên (kiểm chứng: model
+        // "Redmi Note 8" khóa đúng). `resetprop -f` bị SELinux chặn đọc file → không dùng.
+        let mut script = String::from("#!/system/bin/sh\n");
         for (key, val) in props {
             if val.is_empty() {
                 continue;
             }
-            let _ = self
-                .adb(idx, &format!("shell su -c '{rp} {key} \"{val}\"'"))
-                .await;
+            // Bọc value bằng NHÁY ĐƠN: trong nháy đơn, sh KHÔNG diễn giải $ ` \ hay khoảng trắng
+            // → an toàn tuyệt đối với mọi value (không như nháy kép còn nở $VAR/`cmd`). Ký tự '
+            // duy nhất phải thoát bằng idiom '\'' (đóng nháy, ' thoát, mở nháy lại).
+            let esc = val.replace('\'', "'\\''");
+            script.push_str(&format!("{rp} {key} '{esc}'\n"));
         }
-        // 3) Verify: model runtime đã bằng giá trị ta khóa chưa.
-        Ok(self.prop(idx, "ro.product.model").await == hw.model)
+        let host = std::env::temp_dir().join(format!("mpm-lock-{idx}.sh"));
+        if let Err(e) = fs::write(&host, script.as_bytes()) {
+            tracing::warn!(idx, error = %e, "Không ghi được script khóa model tạm");
+            return Ok(false);
+        }
+        let remote = "/data/local/tmp/mpm-lock.sh";
+        let pushed = self
+            .adb(idx, &format!("push \"{}\" {remote}", host.display()))
+            .await;
+        let _ = fs::remove_file(&host);
+        if pushed.is_err() {
+            tracing::warn!(idx, "Không đẩy được script khóa model vào VM");
+            return Ok(false);
+        }
+        // Chạy + VERIFY, thử lại 1 lần (adb thi thoảng 'device offline' chớp nhoáng). VERIFY
+        // CẢ model LẪN build.fingerprint: chỉ kiểm model có thể báo "khóa" nhầm khi model ăn
+        // nhưng fingerprint hỏng → đúng cái INCOHERENCE tính năng này ngăn (finding verify).
+        for _ in 0..2 {
+            let _ = self
+                .adb(idx, &format!("shell su -c 'sh {remote}'"))
+                .await;
+            let model_ok = self.prop(idx, "ro.product.model").await == hw.model;
+            let fp_ok = self.prop(idx, "ro.build.fingerprint").await == hw.build_fingerprint;
+            if model_ok && fp_ok {
+                let _ = self
+                    .adb(idx, &format!("shell su -c 'rm -f {remote}'"))
+                    .await;
+                tracing::info!(idx, model = %hw.model, "Đã KHÓA model + fingerprint qua resetprop (script)");
+                return Ok(true);
+            }
+        }
+        let _ = self
+            .adb(idx, &format!("shell su -c 'rm -f {remote}'"))
+            .await;
+        tracing::warn!(idx, model = %hw.model, "Khóa model/fingerprint KHÔNG verify được sau 2 lần");
+        Ok(false)
     }
 
     async fn human_tap(&self, idx: u32, x: i32, y: i32) -> AppResult<()> {
@@ -621,13 +715,17 @@ impl AdbWorker for MockAdbWorker {
             EmulatorTell {
                 check: "Magisk/resetprop (khóa model)".into(),
                 detected: true,
-                detail: "THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)".into(),
+                detail: "THIẾU — model bị MEmu ghi đè (đặt Magisk APK trong Cài đặt)".into(),
             },
         ])
     }
 
     async fn harden(&self, _idx: u32) -> AppResult<()> {
         Ok(())
+    }
+
+    async fn push_resetprop(&self, _idx: u32, _local_bin: &str) -> AppResult<bool> {
+        Ok(false)
     }
 
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool> {

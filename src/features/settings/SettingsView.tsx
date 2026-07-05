@@ -55,6 +55,18 @@ export function SettingsView() {
           />
         </Field>
 
+        <Field
+          label="Magisk APK (khóa model)"
+          hint="Trỏ tới file Magisk-v30.x.apk. MPM trích resetprop để KHÓA model/fingerprint (chống MEmu ghi đè). Để trống = tắt khóa model."
+        >
+          <input
+            value={settings.magiskApkPath ?? ''}
+            placeholder="D:\MemuTiktok\appTiktok\Magisk-v30.7.apk"
+            onChange={(e) => void save({ magiskApkPath: e.target.value || null })}
+            className="h-9 w-72 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
+          />
+        </Field>
+
         <Field label="Chu kỳ polling (ms)" hint="Tần suất cập nhật trạng thái (1000–10000ms).">
           <input
             type="number"

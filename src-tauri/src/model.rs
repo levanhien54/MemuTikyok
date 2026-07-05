@@ -143,6 +143,11 @@ pub struct AppSettings {
     /// Đường dẫn APK TikTok (None = dùng mặc định DEFAULT_TIKTOK_APK).
     #[serde(default)]
     pub tiktok_apk_path: Option<String>,
+    /// Đường dẫn **Magisk APK** (chứa resetprop) để KHÓA model/fingerprint. None = tắt
+    /// (model bị MEmu ghi đè). MPM trích libmagisk.so từ APK, đẩy vào VM (đã có root),
+    /// dùng `magisk resetprop` — không cần cài Magisk vào hệ thống.
+    #[serde(default)]
+    pub magisk_apk_path: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -154,6 +159,7 @@ impl Default for AppSettings {
             theme: "dark".to_string(),
             layout: "list".to_string(),
             tiktok_apk_path: None,
+            magisk_apk_path: None,
         }
     }
 }
@@ -208,10 +214,12 @@ mod tests {
         let s = AppSettings {
             memu_path: Some("D:/Microvirt/MEmu/memuc.exe".into()),
             tiktok_apk_path: Some("D:/a.apk".into()),
+            magisk_apk_path: Some("D:/Magisk-v30.7.apk".into()),
             ..AppSettings::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tiktok_apk_path.as_deref(), Some("D:/a.apk"));
+        assert_eq!(back.magisk_apk_path.as_deref(), Some("D:/Magisk-v30.7.apk"));
     }
 }

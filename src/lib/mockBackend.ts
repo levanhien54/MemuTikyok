@@ -54,6 +54,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   layout: 'list',
   tiktokApkPath: null,
+  magiskApkPath: null,
 };
 
 /** Quốc gia IP thoát mô phỏng của "host" (để test cổng quốc gia khi Chạy profile). */
@@ -180,7 +181,7 @@ export function createMockBackend(): Backend {
         {
           check: 'Magisk/resetprop (khóa model)',
           detected: true,
-          detail: 'THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)',
+          detail: 'THIẾU — model bị MEmu ghi đè (đặt Magisk APK trong Cài đặt)',
         },
       ];
     },

@@ -12,6 +12,7 @@ mod fingerprint;
 mod geo;
 mod humanize;
 mod logcap;
+mod magisk;
 mod memuc;
 mod model;
 mod orchestrator;
@@ -162,6 +163,32 @@ fn build_store() -> Arc<dyn SnapshotStore> {
     }
 }
 
+/// Trích binary magisk (resetprop) từ Magisk APK cấu hình trong settings, cache vào
+/// thư mục dữ liệu. Trả `None` nếu chưa cấu hình / APK hỏng → model không khóa được.
+/// `pub(crate)` để `save_settings` áp lại NGAY khi người dùng đổi đường dẫn (không đợi restart).
+pub(crate) fn init_magisk_bin(settings: &AppSettings) -> Option<PathBuf> {
+    let apk = settings
+        .magisk_apk_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    if !std::path::Path::new(apk).is_file() {
+        tracing::warn!(apk, "Magisk APK cấu hình không tồn tại — bỏ qua khóa model");
+        return None;
+    }
+    let cache = data_dir()?.join("magisk");
+    match crate::magisk::ensure_binary(apk, &cache) {
+        Some(bin) => {
+            tracing::info!(bin = %bin.display(), "Đã trích binary magisk (resetprop) từ APK");
+            Some(bin)
+        }
+        None => {
+            tracing::warn!(apk, "Không trích được libmagisk.so từ APK — bỏ qua khóa model");
+            None
+        }
+    }
+}
+
 /// Mở SQLite và nạp metadata; trả về (db, metadata). Lỗi → fallback chỉ-bộ-nhớ.
 fn init_db() -> (Option<Db>, HashMap<u32, InstanceMeta>) {
     let Some(path) = db_path() else {
@@ -193,9 +220,12 @@ pub fn run() {
     let adb = build_adb(&settings);
     let store = build_store();
     let (db, metadata) = init_db();
+    // Trích binary magisk TRƯỚC khi move `settings` vào AppState.
+    let magisk_bin = init_magisk_bin(&settings);
     let app_state: state::SharedState = Arc::new(AppState::new(
         memuc, geo, adb, store, settings, db, metadata,
     ));
+    app_state.set_magisk_bin(magisk_bin);
     let reconcile_state = app_state.clone();
 
     tauri::Builder::default()

@@ -65,6 +65,9 @@ pub struct AppState {
     /// Ánh xạ profile ĐANG CHẠY → vm_index (bộ nhớ, không persist). Dùng **std Mutex**
     /// (không giữ qua await ở đâu cả) để RAII guard nhả chỗ được TRONG Drop (đồng bộ).
     pub running_profiles: std::sync::Mutex<HashMap<String, u32>>,
+    /// Binary magisk (resetprop) đã trích từ Magisk APK — set lúc khởi động nếu
+    /// `settings.magisk_apk_path` có. None = không khóa được model (thiếu Magisk APK).
+    pub magisk_bin: std::sync::Mutex<Option<std::path::PathBuf>>,
 }
 
 impl AppState {
@@ -100,7 +103,18 @@ impl AppState {
             running_sessions: Mutex::new(HashSet::new()),
             profiles: Mutex::new(profiles),
             running_profiles: std::sync::Mutex::new(HashMap::new()),
+            magisk_bin: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Đặt đường dẫn binary magisk (resetprop) đã trích (gọi lúc khởi động).
+    pub fn set_magisk_bin(&self, path: Option<std::path::PathBuf>) {
+        *self.magisk_bin.lock().unwrap() = path;
+    }
+
+    /// Đường dẫn binary magisk (nếu có) — provision đẩy vào VM để khóa model.
+    pub fn magisk_bin(&self) -> Option<std::path::PathBuf> {
+        self.magisk_bin.lock().unwrap().clone()
     }
 
     /// Ghi/cập nhật profile vào bộ nhớ + DB.

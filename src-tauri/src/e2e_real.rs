@@ -731,6 +731,9 @@ impl AdbWorker for FailingBackupAdb {
     async fn harden(&self, idx: u32) -> AppResult<()> {
         self.0.harden(idx).await
     }
+    async fn push_resetprop(&self, idx: u32, local_bin: &str) -> AppResult<bool> {
+        self.0.push_resetprop(idx, local_bin).await
+    }
     async fn lock_device_identity(
         &self,
         idx: u32,
@@ -1076,6 +1079,86 @@ async fn a12_profile_lifecycle_real() {
         "stop khi không chạy phải None"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A.12 — KHÓA MODEL thật qua Magisk resetprop (đẩy binary + chạy script). Kiểm ca
+/// KHÓ NHẤT: model CÓ KHOẢNG TRẮNG ("Redmi Note 8") — value bị adb-shell tách nếu
+/// truyền qua command line, nên code sinh script rồi `sh <file>`. Test chứng minh
+/// end-to-end: provision fresh VM → push_resetprop → lock_device_identity → model
+/// runtime đúng "Redmi Note 8" (đọc lại độc lập qua memuc adb).
+#[tokio::test]
+#[ignore]
+async fn a12_khoa_model_co_khoang_trang() {
+    if !memu_available() {
+        eprintln!("[skip] Không có MEmu");
+        return;
+    }
+    // Cần Magisk APK người dùng đã tải để trích resetprop.
+    let apk = r"D:\MemuTiktok\appTiktok\Magisk-v30.7.apk";
+    if !std::path::Path::new(apk).is_file() {
+        eprintln!("[skip] Không có Magisk APK tại {apk}");
+        return;
+    }
+    let (state, dir) = make_state("a12").await;
+    let mp = memuc_path();
+    // Trích + set binary magisk (như lib.rs làm lúc khởi động).
+    let bin = crate::magisk::ensure_binary(apk, &dir.join("magisk")).expect("trích libmagisk.so");
+    state.set_magisk_bin(Some(bin));
+
+    let guard = VmGuard::new(mp.clone());
+    let before = index_set(&state).await;
+
+    // Model CÓ KHOẢNG TRẮNG — ca dễ hỏng nhất.
+    let mut hw = hw();
+    hw.model = "Redmi Note 8".into();
+    hw.brand = "Xiaomi".into();
+    hw.manufacturer = "Xiaomi".into();
+    hw.device = "ginkgo".into();
+    hw.build_fingerprint = "Xiaomi/ginkgo/ginkgo:9/PKQ1.190616.001/V11:user/release-keys".into();
+
+    // provision boot VM + push_resetprop + lock_device_identity.
+    let idx = orchestrator::provision(&state, "acc_lock", &hw, None)
+        .await
+        .expect("provision");
+    guard.track(idx);
+    assert_new_index(&before, idx);
+
+    // 1) lock_device_identity trả true (nội bộ đã verify model == hw.model).
+    let locked = state
+        .adb
+        .lock_device_identity(idx, &hw)
+        .await
+        .expect("lock_device_identity");
+    assert!(locked, "lock_device_identity phải trả true (model đã khóa)");
+
+    // 2) Đọc lại ĐỘC LẬP qua memuc adb — chắc chắn value có khoảng trắng giữ nguyên.
+    let out = Command::new(&mp)
+        .args(["-i", &idx.to_string(), "adb", "shell", "getprop", "ro.product.model"])
+        .output()
+        .expect("getprop model");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let model = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty() && !l.contains("already connected"))
+        .unwrap_or("");
+    assert_eq!(model, "Redmi Note 8", "model runtime phải = 'Redmi Note 8'");
+
+    // 3) fingerprint cũng phải khóa (coherence model↔fingerprint — lý do tính năng tồn tại).
+    let out_fp = Command::new(&mp)
+        .args(["-i", &idx.to_string(), "adb", "shell", "getprop", "ro.build.fingerprint"])
+        .output()
+        .expect("getprop fingerprint");
+    let text_fp = String::from_utf8_lossy(&out_fp.stdout);
+    let fp = text_fp
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty() && !l.contains("already connected"))
+        .unwrap_or("");
+    assert_eq!(fp, hw.build_fingerprint, "fingerprint runtime phải khớp hồ sơ");
+
+    drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

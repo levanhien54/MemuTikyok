@@ -1,81 +1,69 @@
-# Provision base image MEmu: Magisk + resetprop (khóa model)
+# Khóa model qua Magisk resetprop (standalone — KHÔNG cần base image)
 
 > Phương án **(A)** từ [ANTI_DETECTION_UPGRADE.md](ANTI_DETECTION_UPGRADE.md). Mục tiêu:
-> đưa **`resetprop`** (applet Magisk) vào base image MEmu để MPM **khóa `ro.product.model`
-> + đồng bộ `ro.build.fingerprint`** mỗi lần khởi chạy — chống MEmu random model khi boot.
+> **khóa `ro.product.model` + đồng bộ `ro.build.fingerprint`** mỗi lần Chạy — chống MEmu
+> random model khi boot.
 >
-> ✅ **Trạng thái CODE (2026-07-06):** MPM đã sẵn sàng dùng resetprop:
-> - `AdbWorker::lock_device_identity` gọi resetprop sau boot + **VERIFY** (đọc lại
->   `ro.product.model` = model đã khóa) → trả `true/false`. Gọi trong `provision` mỗi lần Chạy.
-> - **Scan "Kiểm tra dấu vết ảo"** có mục **"Magisk/resetprop (khóa model)"**: đỏ = thiếu
->   resetprop (model bị ghi đè), sạch = base đã sẵn sàng. Đây là cách kiểm base image nhanh nhất.
-> - **LogsView** hiện log `lock_device_identity` (warn nếu thiếu resetprop).
->
-> Việc còn lại (một-lần, thủ công, TRÊN MÁY BẠN): đưa resetprop vào **ảnh hệ thống DÙNG CHUNG**
-> của MEmu để mọi VM `run_profile` tạo mới đều thừa hưởng (xem mục "Base image" bên dưới).
+> ✅ **Đã hiện thực (2026-07-06):** MPM tự làm HẾT, chỉ cần bạn trỏ **Magisk APK** trong
+> Cài đặt. KHÔNG cần MagiskOnEmu / Magisk Delta / sửa base image thủ công nữa.
+
+## Cách hoạt động (đã kiểm chứng trên MEmu thật)
+
+MEmu có **root native** (`enable_su=1` → `uid=0`) nhưng **không** có Magisk/resetprop.
+`resetprop` là applet của binary `magisk`, đóng gói sẵn trong **Magisk APK** dưới
+`lib/<abi>/libmagisk.so`. Vì đã có root, MPM chỉ cần **đẩy binary vào VM và chạy
+`magisk resetprop`** — không cần cài Magisk vào hệ thống. Hợp mô hình disposable (VM tạo
+mới mỗi lần Chạy): binary được đẩy lại mỗi lần provision.
+
+Luồng tự động trong `provision` (sau `wait_boot_completed`):
+1. **Khởi động (một lần):** `magisk::ensure_binary` trích `lib/x86_64/libmagisk.so` từ APK →
+   cache `%APPDATA%\com.mpm.manager\magisk\magisk-x86_64`. MEmu = x86_64 (đã kiểm chứng).
+2. **Mỗi provision:** `push_resetprop` đẩy binary vào `/data/local/tmp/magisk` + `chmod 755`
+   + verify `magisk -c` (ra version, vd `30.7:MAGISK:R (30700)`).
+3. `lock_device_identity` **sinh script** đặt 6 prop rồi chạy `sh <file>` (xem "Vì sao script").
+4. **VERIFY:** đọc lại `ro.product.model` = model đã khóa → trả `true/false` (log ở LogsView).
+
+## Cấu hình (việc DUY NHẤT bạn cần làm)
+
+1. Tải **Magisk APK chính thống** ([github.com/topjohnwu/Magisk/releases](https://github.com/topjohnwu/Magisk/releases)
+   — đã kiểm chứng v30.7). KHÔNG dùng bản repack lạ.
+2. Trong MPM → **Cài đặt** → **"Magisk APK (khóa model)"** → trỏ tới file `.apk`
+   (vd `D:\MemuTiktok\appTiktok\Magisk-v30.7.apk`).
+3. Xong. Mỗi lần Chạy profile, MPM tự đẩy resetprop + khóa model.
+   - Để trống ô này = **tắt** khóa model (model sẽ bị MEmu ghi đè).
 
 ## Vì sao cần resetprop (không dùng được cách khác)
 - `ro.product.model` là prop **read-only** — sau boot `setprop` bị `property_service` chặn.
 - Sửa `/system/build.prop` + reboot **không ăn** vì MEmu ghi đè model **mỗi lần boot**.
 - Chỉ **`resetprop`** (ghi thẳng `prop_area`, bypass property_service) đổi được `ro.*`
-  tại runtime. MPM chạy nó **sau `wait_boot_completed`** (muộn hơn cả lúc MEmu ghi đè) → thắng.
+  tại runtime. MPM chạy nó **sau `wait_boot_completed`** (muộn hơn lúc MEmu ghi đè) → thắng.
 
-## Yêu cầu
-- MEmu có root (MPM tự đặt `enable_su=1`).
-- **Chỉ dùng Magisk CHÍNH THỐNG** (github.com/topjohnwu/Magisk) hoặc Magisk Delta.
-  KHÔNG dùng bản repack lạ.
+## Vì sao sinh SCRIPT thay vì chạy từng lệnh resetprop
+Value model thường **có khoảng trắng** ("Redmi Note 8", "Pixel 7"). Nếu chạy
+`adb shell su -c 'magisk resetprop ro.product.model "Redmi Note 8"'`, chuỗi bị **3 tầng sh**
+(memuc → adbd → `su -c`) tách lại → resetprop nhận 3 tham số, **model KHÔNG khóa** (kiểm
+chứng thực: brand/device/fingerprint đổi được, model thì không). Cách chắc chắn: MPM **sinh
+file script**, đẩy vào VM, chạy `sh <file>` — sh đọc nháy kép **từ file** nên value giữ
+nguyên. (`resetprop -f <propfile>` bị SELinux chặn đọc file → không dùng được.)
 
-## Cách 1 — MagiskOnEmu (khuyến nghị, hỗ trợ MEmu trực tiếp)
-1. Tải script chính thức: https://github.com/code871/MagiskOnEmu (GPL-3.0, 100% shell).
-2. Trên **một VM MEmu đang chạy** (sẽ dùng làm base image), đẩy script và chạy theo README
-   của repo (nó tự tải Magisk chính thức + cài vào system partition của emulator).
-3. Khởi động lại VM. Xác minh:
-   ```
-   memuc -i <idx> adb "shell su -c 'command -v resetprop || ls /data/adb/magisk/resetprop'"
-   memuc -i <idx> adb "shell su -c 'resetprop ro.product.model TEST && getprop ro.product.model'"
-   ```
-   → phải in ra đường dẫn resetprop và `TEST`.
-
-## Cách 2 — Magisk Delta (cài vào system partition cho emulator)
-- Dùng khi Cách 1 flaky với MEmu (có báo cáo). Xem README Magisk Delta cho emulator.
-
-## Base image cho MÔ HÌNH DISPOSABLE (quan trọng — đã đổi kiến trúc)
-
-⚠️ MPM **KHÔNG còn clone/pool**. `run_profile` tạo VM mới bằng `memuc create` mỗi lần Chạy.
-Nên **KHÔNG** cài Magisk vào một VM riêng lẻ (VM đó bị hủy sau mỗi phiên) — phải đưa resetprop
-vào **ẢNH HỆ THỐNG DÙNG CHUNG** của MEmu để mọi VM `create` mới đều thừa hưởng.
-
-- MEmu chia sẻ **partition system ~1.3GB** giữa các VM; mỗi VM chỉ là delta mỏng (~50MB). Cài
-  Magisk vào partition system dùng chung này (qua MagiskOnEmu/Magisk Delta ở trên) → **mọi VM
-  tạo sau đều có resetprop**, không cần clone.
-- Nếu bản MEmu của bạn KHÔNG chia sẻ system (mỗi VM một system riêng): cài vào **ảnh master/mẫu**
-  mà `memuc create` sao chép từ đó (tùy phiên bản MEmu). Nếu cả hai bất khả → resetprop không
-  phổ biến được cho luồng disposable; chấp nhận known-gap model (xem ANTI_DETECTION_UPGRADE.md).
-- **Kiểm nhanh sau khi cài:** trong MPM, Chạy 1 profile → mở menu ⋮ → "Kiểm tra dấu vết ảo".
-  Mục **"Magisk/resetprop (khóa model)"** phải **KHÔNG** đỏ (sạch). Nếu vẫn đỏ → VM `create`
-  chưa thừa hưởng resetprop (system chưa được sửa đúng chỗ dùng chung).
-
-## MPM tự khóa model — KHÔNG cần Magisk module
-MPM gọi `lock_device_identity` **sau boot mỗi lần launch/provision/clone/swap**:
+Các prop được khóa (nhất quán fingerprint):
 ```
-resetprop ro.product.model        <model>
-resetprop ro.product.brand        <brand>
-resetprop ro.product.manufacturer <manufacturer>
-resetprop ro.product.device       <device>
-resetprop ro.product.name         <device>
-resetprop ro.build.fingerprint    <build_fingerprint>
+ro.product.model        <model>
+ro.product.brand        <brand>
+ro.product.manufacturer <manufacturer>
+ro.product.device       <device>
+ro.product.name         <device>
+ro.build.fingerprint    <build_fingerprint>
 ```
-→ Không cần dựng Magisk module boot-script; MPM re-assert mỗi lần chạy (đúng lúc, sau
-MEmu override). (Tùy chọn: thêm module `post-fs-data`+`late_start service.d` nếu muốn
-khóa cả trong lúc boot trước khi MPM gọi.)
 
-## Xác minh cuối (sau khi cài Magisk vào system dùng chung)
-1. Trong MPM: Chạy 1 profile → tab **Logs** xem `lock_device_identity` (không còn warn "VM chưa
-   có resetprop"); menu ⋮ → **"Kiểm tra dấu vết ảo"** → mục "Magisk/resetprop (khóa model)" SẠCH.
+## Xác minh
+1. **Scan "Kiểm tra dấu vết ảo"** (menu ⋮ trên VM đang chạy) → mục
+   **"Magisk/resetprop (khóa model)"** phải **KHÔNG đỏ** (sạch = có resetprop). Đây là cách
+   kiểm nhanh nhất. Đỏ = chưa trỏ Magisk APK, hoặc APK hỏng/không có `lib/x86_64/libmagisk.so`.
 2. `memuc -i <idx> adb "shell getprop ro.product.model"` = model của profile (không phải MEmu random).
 3. `getprop ro.build.fingerprint` = fingerprint thật khớp model.
-4. (App dò) cài "Emulator Detector"/"Momo" kiểm — LƯU Ý native-bridge + hypervisor **vẫn lộ**
-   (cố hữu x86), model/fingerprint nay nhất quán.
+4. **Test tự động:** `cargo test --lib a12_khoa_model_co_khoang_trang -- --ignored --nocapture`
+   provision VM thật, khóa model **có khoảng trắng** ("Redmi Note 8"), verify runtime, rồi hủy VM.
 
 ## Giới hạn còn lại (không khắc phục ở tầng này)
 - **native-bridge (libnb.so)** + **cờ hypervisor cpuinfo** vẫn lộ trên MEmu x86 —

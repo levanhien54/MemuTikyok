@@ -130,4 +130,6 @@ export interface AppSettings {
   layout: 'grid' | 'list';
   /** Đường dẫn APK TikTok (null = dùng mặc định). */
   tiktokApkPath: string | null;
+  /** Đường dẫn Magisk APK (chứa resetprop) để KHÓA model/fingerprint (null = tắt). */
+  magiskApkPath: string | null;
 }

@@ -162,8 +162,15 @@ async fn provision_prepare(
     state.mark_launched(index).await;
     state.adb.wait_boot_completed(index).await?;
     state.adb.apply_android_id(index, &hw.android_id).await?;
-    // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
-    // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
+    // Đẩy binary magisk (resetprop) vào VM nếu người dùng đã cấu hình Magisk APK —
+    // VM disposable nên đẩy mỗi lần provision. Sau đó khóa model post-boot (chống MEmu
+    // random ro.product.model). Best-effort — no-op nếu chưa có Magisk APK.
+    if let Some(bin) = state.magisk_bin() {
+        let _ = state
+            .adb
+            .push_resetprop(index, &bin.to_string_lossy())
+            .await;
+    }
     let _ = state.adb.lock_device_identity(index, hw).await;
     auto_debloat(state, index).await;
 

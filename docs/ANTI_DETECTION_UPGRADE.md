@@ -8,12 +8,16 @@
 > (kể cả Redroid-x86) gỡ được → **KHÔNG THỂ** đạt "máy ảo không thể phát hiện". MPM chỉ
 > giảm bề mặt lộ ở các trường **SỬA ĐƯỢC**: độ phân giải/DPI, MAC, ẩn root.
 >
-> ⚠️ Riêng **`ro.product.model`** (MEmu random khi boot) và **`android_id`** (GMS ghi đè
-> SAU khi cài+chạy TikTok — Android 8+ cấp id theo app) CHỈ khóa được khi có **Magisk +
-> resetprop** trong base image. Hiện `lock_device_identity` trả `Ok(false)` (no-op) nếu
-> thiếu Magisk → `build_fingerprint` "coherent" ở fingerprint.rs **CÓ THỂ lệch** model
-> runtime. Vậy "MPM đã làm vậy" ở các mục dưới CHỈ đúng KHI đã dựng base image Magisk
-> (xem [`BASE_IMAGE_MAGISK_SETUP.md`](BASE_IMAGE_MAGISK_SETUP.md)); **mặc định là chưa**.
+> ✅ **`ro.product.model`** (MEmu random khi boot) nay **KHÓA ĐƯỢC** qua **Magisk resetprop
+> standalone**: MPM trích `libmagisk.so` từ **Magisk APK** (bạn trỏ trong Cài đặt), đẩy vào
+> mỗi VM (đã có root native), chạy `magisk resetprop` — **không cần base image / cài Magisk
+> hệ thống**. `lock_device_identity` sinh script + VERIFY (đọc lại model), đã kiểm chứng thực
+> khóa được cả model **có khoảng trắng** ("Redmi Note 8"). Xem
+> [`BASE_IMAGE_MAGISK_SETUP.md`](BASE_IMAGE_MAGISK_SETUP.md). Để trống ô Magisk APK = tắt
+> (model bị ghi đè, `build_fingerprint` coherent CÓ THỂ lệch model runtime).
+>
+> ⚠️ Riêng **`android_id`** vẫn bị GMS ghi đè SAU khi cài+chạy TikTok (Android 8+ cấp id
+> theo app) — resetprop không giữ được qua vòng đời đó; đây là known-gap còn lại.
 >
 > Cổng "quốc gia yêu cầu" chỉ kiểm **IP thoát của HOST** (mọi VM chung NAT host) — là
 > phép kiểm VPN mức-host, KHÔNG cách ly geo per-account. Chạy nhiều account cùng 1 IP
