@@ -1,7 +1,7 @@
 //! State dùng chung của ứng dụng (§8.3 SRS). Giữ adapter memuc, hàng đợi lệnh,
 //! registry instance, settings, metadata (persist SQLite) và geolocator.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +44,8 @@ pub struct AppState {
     /// Khóa tuần tự hóa thao tác "tạo/clone VM rồi nhận diện index mới" — tránh
     /// hai lần tạo song song cùng chọn nhầm một index (race + tái dùng index).
     pub create_lock: Mutex<()>,
+    /// VM đang chạy phiên automation — chặn phiên TRÙNG trên cùng VM.
+    pub running_sessions: Mutex<HashSet<u32>>,
 }
 
 impl AppState {
@@ -70,6 +72,7 @@ impl AppState {
             db,
             pool: Mutex::new(VecDeque::new()),
             create_lock: Mutex::new(()),
+            running_sessions: Mutex::new(HashSet::new()),
         }
     }
 

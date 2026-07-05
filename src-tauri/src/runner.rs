@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::humanize::{self, Rng};
+use crate::model::TIKTOK_PKG;
 use crate::state::{now_ms, SharedState};
 
 /// Cấu hình phiên xem (FE truyền hoặc dùng mặc định).
@@ -82,9 +83,29 @@ pub fn plan_session(cfg: &WatchConfig, rng: &mut Rng) -> Vec<VideoAction> {
         .collect()
 }
 
-/// Chạy phiên xem: mỗi video → xem (ngẫu nhiên) → (đôi khi) like double-tap giữa →
-/// cuộn sang video kế (swipe giữa) → nghỉ ngắn. Trả báo cáo.
+/// Chạy phiên xem: chặn phiên TRÙNG → chạy → luôn gỡ khóa khi xong (kể cả lỗi).
 pub async fn run_watch_session(
+    state: &SharedState,
+    idx: u32,
+    cfg: WatchConfig,
+) -> AppResult<SessionReport> {
+    // Chặn hai phiên chạy song song trên cùng VM (double-click → input xung đột).
+    {
+        let mut running = state.running_sessions.lock().await;
+        if !running.insert(idx) {
+            return Err(AppError::InvalidInput(
+                "Đã có phiên xem đang chạy cho VM này".into(),
+            ));
+        }
+    }
+    let result = run_session_inner(state, idx, cfg).await;
+    state.running_sessions.lock().await.remove(&idx);
+    result
+}
+
+/// Thân phiên: đưa TikTok ra foreground → mỗi video xem → (đôi khi) like double-tap
+/// giữa → cuộn sang video kế → nghỉ ngắn.
+async fn run_session_inner(
     state: &SharedState,
     idx: u32,
     cfg: WatchConfig,
@@ -96,6 +117,11 @@ pub async fn run_watch_session(
         .map(|hw| (hw.res_width as i32, hw.res_height as i32))
         .unwrap_or((1080, 1920));
     let (cx, cy) = (w / 2, h / 2);
+
+    // BẮT BUỘC đưa TikTok ra foreground trước khi thao tác — nếu không sẽ swipe/tap
+    // nhầm màn hình (launcher/app khác). Chờ ổn định.
+    state.adb.start_app(idx, TIKTOK_PKG).await?;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
 
     let mut rng = Rng::from_entropy();
     let plan = plan_session(&cfg, &mut rng);
