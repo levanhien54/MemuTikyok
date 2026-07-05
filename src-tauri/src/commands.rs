@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::error::{AppError, AppResult};
 use crate::model::{
     AccountProfile, AppSettings, BulkOperation, CreateInstancePayload, EmulatorTell,
-    HardwareProfile, Instance, Profile, ProfileView, SnapshotRecord, TIKTOK_PKG,
+    HardwareProfile, Instance, ProfileView, SnapshotRecord, TIKTOK_PKG,
 };
 use crate::orchestrator;
 use crate::state::{now_ms, SharedState};
@@ -203,7 +203,7 @@ pub async fn provision_session(
     hardware: HardwareProfile,
     state: State<'_, SharedState>,
 ) -> AppResult<u32> {
-    orchestrator::provision(state.inner(), &account_key, &hardware).await
+    orchestrator::provision(state.inner(), &account_key, &hardware, None).await
 }
 
 /// Clone từ base image + áp fingerprint riêng cho tài khoản → chạy. Trả index VM mới.
@@ -390,9 +390,8 @@ pub async fn teardown_session(
 }
 
 // ── Profiles (kiến trúc disposable: profile = dữ liệu bền, VM = pool tạm) ──
-
-/// Số VM chạy đồng thời tối đa (kế hoạch §18: tối đa ~5 VM).
-const MAX_RUNNING_VMS: usize = 5;
+// Lõi nghiệp vụ nằm ở `crate::profile_ops` để test được trực tiếp (kể cả E2E thật);
+// các lệnh dưới đây chỉ là adapter mỏng của biên IPC.
 
 /// Tạo PROFILE mới — CHỈ ghi dữ liệu (account + fingerprint), KHÔNG tạo VM.
 #[tauri::command]
@@ -402,46 +401,13 @@ pub async fn create_profile(
     country: Option<String>,
     state: State<'_, SharedState>,
 ) -> AppResult<String> {
-    let username = account.tiktok_username.trim().to_string();
-    if username.is_empty() {
-        return Err(AppError::InvalidInput(
-            "Tên tài khoản không được rỗng".into(),
-        ));
-    }
-    if state.get_profile(&username).await.is_some() {
-        return Err(AppError::InvalidInput("Profile tên này đã tồn tại".into()));
-    }
-    let hardware = crate::fingerprint::generate()?;
-    let profile = Profile {
-        username: username.clone(),
-        account: AccountProfile {
-            tiktok_username: username.clone(),
-            ..account
-        },
-        hardware,
-        country: country
-            .map(|c| c.trim().to_uppercase())
-            .filter(|c| !c.is_empty()),
-        note: note.unwrap_or_default().trim().to_string(),
-        created_at: now_ms(),
-        last_run_at: None,
-    };
-    state.upsert_profile(profile).await;
-    Ok(username)
+    crate::profile_ops::create(state.inner(), account, note, country).await
 }
 
 /// Danh sách profile + trạng thái runtime (đang chạy trên VM nào).
 #[tauri::command]
 pub async fn list_profiles(state: State<'_, SharedState>) -> AppResult<Vec<ProfileView>> {
-    let mut views = Vec::new();
-    for p in state.list_profiles().await {
-        let running_vm = state.running_vm_of(&p.username).await;
-        views.push(ProfileView {
-            profile: p,
-            running_vm,
-        });
-    }
-    Ok(views)
+    Ok(crate::profile_ops::list(state.inner()).await)
 }
 
 /// Cập nhật account/ghi chú/quốc gia của profile (giữ nguyên username-key).
@@ -453,62 +419,14 @@ pub async fn update_profile(
     country: Option<String>,
     state: State<'_, SharedState>,
 ) -> AppResult<()> {
-    let mut p = state
-        .get_profile(&username)
-        .await
-        .ok_or_else(|| AppError::InvalidInput("Không tìm thấy profile".into()))?;
-    p.account = AccountProfile {
-        tiktok_username: username.clone(),
-        ..account
-    };
-    p.note = note.trim().to_string();
-    p.country = country
-        .map(|c| c.trim().to_uppercase())
-        .filter(|c| !c.is_empty());
-    state.upsert_profile(p).await;
-    Ok(())
+    crate::profile_ops::update(state.inner(), &username, account, note, country).await
 }
 
-/// CHẠY profile: lấy/tạo VM từ pool, áp fingerprint + restore session theo username,
-/// mở TikTok. Giữ vm_index ↔ username. Chặn khi vượt tối đa 5 VM.
+/// CHẠY profile: lấy/tạo VM từ pool, áp fingerprint + cài TikTok + restore session
+/// theo username, mở TikTok. Giữ vm_index ↔ username. Chặn khi vượt tối đa 5 VM.
 #[tauri::command]
 pub async fn run_profile(username: String, state: State<'_, SharedState>) -> AppResult<u32> {
-    let profile = state
-        .get_profile(&username)
-        .await
-        .ok_or_else(|| AppError::InvalidInput("Không tìm thấy profile".into()))?;
-    // Đã chạy rồi → trả VM hiện tại.
-    if let Some(vm) = state.running_vm_of(&username).await {
-        return Ok(vm);
-    }
-    // Cổng quốc gia: IP thoát thực tế phải khớp quốc gia yêu cầu của profile.
-    if let Some(expected) = profile.country.as_deref().filter(|c| !c.is_empty()) {
-        match state.geo.country("").await {
-            Some(actual) if actual.eq_ignore_ascii_case(expected) => {}
-            Some(actual) => {
-                return Err(AppError::CountryMismatch {
-                    actual: actual.to_uppercase(),
-                    expected: expected.to_string(),
-                })
-            }
-            None => return Err(AppError::CountryUnverified(expected.to_string())),
-        }
-    }
-    // Giới hạn số VM chạy đồng thời (kế hoạch: tối đa 5).
-    if state.running_profiles.lock().await.len() >= MAX_RUNNING_VMS {
-        return Err(AppError::InvalidInput(format!(
-            "Đã đạt tối đa {MAX_RUNNING_VMS} VM chạy đồng thời — dừng bớt profile khác trước"
-        )));
-    }
-    // Provision VM sạch cho profile (create → fingerprint → boot → restore session theo username).
-    let idx = orchestrator::provision(state.inner(), &username, &profile.hardware).await?;
-    let _ = state.adb.start_app(idx, TIKTOK_PKG).await;
-    state.set_running_profile(&username, idx).await;
-    // Cập nhật last_run_at.
-    let mut p = profile;
-    p.last_run_at = Some(now_ms());
-    state.upsert_profile(p).await;
-    Ok(idx)
+    crate::profile_ops::run(state.inner(), &username).await
 }
 
 /// DỪNG profile: backup session → HỦY VM (disposable) → nhả pool. Trả snapshot nếu có.
@@ -517,23 +435,13 @@ pub async fn stop_profile(
     username: String,
     state: State<'_, SharedState>,
 ) -> AppResult<Option<SnapshotRecord>> {
-    let Some(idx) = state.running_vm_of(&username).await else {
-        return Ok(None);
-    };
-    let rec = orchestrator::teardown(state.inner(), idx, &username).await;
-    state.clear_running_profile(&username).await;
-    rec.map(Some)
+    crate::profile_ops::stop(state.inner(), &username).await
 }
 
 /// XÓA profile: nếu đang chạy thì teardown trước, rồi xóa bản ghi.
 #[tauri::command]
 pub async fn delete_profile(username: String, state: State<'_, SharedState>) -> AppResult<()> {
-    if let Some(idx) = state.running_vm_of(&username).await {
-        let _ = orchestrator::teardown(state.inner(), idx, &username).await;
-        state.clear_running_profile(&username).await;
-    }
-    state.delete_profile(&username).await;
-    Ok(())
+    crate::profile_ops::delete(state.inner(), &username).await
 }
 
 #[tauri::command]

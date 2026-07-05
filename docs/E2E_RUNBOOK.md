@@ -228,3 +228,40 @@ Chỉ chạy nếu cần kiểm đa tài khoản. Xác nhận thủ công của 
 **Ánh xạ sang test tự động** (phần này bổ sung cho, không thay thế): B.2↔A.4/A.8 (fingerprint); **B.3↔A.9** (round-trip data-survival, nhưng payload là phiên thật); B.3.3↔A.10 (R-15 backup-trước-hủy); B.4↔A.8 (R-12 isolation).
 
 **Điều máy KHÔNG tự làm được (lý do tồn tại runbook này):** nhập credential thật (B1.3), phán đoán trực quan cửa sổ/độ phân giải giả (B.2), và verdict "còn đăng nhập không" trên phiên restore (B3.5). Mọi bước còn lại đều phản chiếu các luồng orchestrator đã được tự động hoá.
+
+---
+
+## 8. E2E vòng đời PROFILE (A.12) — phát hiện qua chạy thật
+
+`A.12 (a12_profile_lifecycle_real)` tự động hoá TOÀN BỘ vòng đời profile-centric qua
+đúng code production `crate::profile_ops` (create → run → stop): create profile (KHÔNG
+tạo VM) → run (provision VM sạch + fingerprint + **cài TikTok** + đăng ký running) →
+run lần 2 idempotent → stop (backup phiên + **HỦY VM**) → profile bền + snapshot ghi DB
++ VM biến mất. Chạy: `cargo test --lib e2e_real::a12 -- --ignored --nocapture` (~80s).
+
+Ba phát hiện chỉ lộ khi chạy thật (mỗi cái bị lỗi silent phía trước che):
+
+1. **MEmu KHÔNG hỗ trợ adb streamed install.** `adb install` mặc định dùng streamed →
+   `adb: failed to install ...: Performing Streamed Install` (thất bại tức thì, KHÔNG
+   push byte nào). **Fix: bắt buộc `--no-streaming`** (push-rồi-install; 230MB ~5–12s →
+   `Success`). `RealAdbWorker::install_apk`.
+
+2. **`adb install` báo kết quả ở OUTPUT, không phải exit code** — nhiều bản exit 0 dù in
+   `Failure`/`failed to install`. **Fix: đọc output tìm `Success`** (bắt cả stderr), nếu
+   không thấy → `Err`. Trước đây lỗi này bị nuốt → VM chạy nhưng KHÔNG có TikTok.
+
+3. **`failed to read copy response` chớp nhoáng** ngay sau provision boot + áp
+   android_id/debloat/harden (rớt kết nối lúc commit dù push xong). **Fix: thử lại tối đa
+   3 lần, chờ VM lắng** (kiểm chứng: lần 2 ăn).
+
+**Known-gap (KHÔNG assert cứng, chỉ cảnh báo):**
+- **android_id bị GMS/MEmu ghi đè SAU khi cài + chạy TikTok.** android_id áp được & BỀN
+  khi CHƯA cài app (A.4 PASS: đọc lại đúng giá trị áp). Nhưng Android 8+ cấp android_id
+  theo app và GMS tự quản → sau khi cài+chạy TikTok, `settings get secure android_id`
+  trả giá trị KHÁC giá trị áp. Cùng lớp với known-gap `ro.product.model` (MEmu random khi
+  boot). Muốn khóa cứng cần **Magisk + resetprop / Xposed-module** — user đã bỏ hướng #2.
+  Fingerprint thực sự áp được & bền trên MEmu vanilla: **độ phân giải/DPI, MAC, root**.
+
+**An toàn VM:** provision nay NGUYÊN TỬ — mọi bước sau `create_vm` mà lỗi thì tự
+`stop + remove + forget` VM vừa tạo (không rò "VM mồ côi"). Đã kiểm chứng: 4 lần a12 fail
+liên tiếp trong lúc gỡ lỗi đều để `listvms` về đúng `0,MEmu` (0 VM mồ côi).

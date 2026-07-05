@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 use crate::error::{AppError, AppResult};
 use crate::humanize::{self, Rng};
@@ -221,9 +221,45 @@ impl AdbWorker for RealAdbWorker {
 
     async fn install_apk(&self, idx: u32, apk_path: &str) -> AppResult<()> {
         // -r: cài đè nếu đã có; -g: cấp sẵn quyền runtime.
-        self.adb(idx, &format!("install -r -g \"{apk_path}\""))
-            .await
-            .map(|_| ())
+        // ⚠️ --no-streaming BẮT BUỘC: MEmu KHÔNG hỗ trợ streamed install — adb mặc định
+        //    dùng streamed → "adb: failed to install ...: Performing Streamed Install"
+        //    (thất bại tức thì, không push byte nào; kiểm chứng qua test thực). Ép chế độ
+        //    push-rồi-install (--no-streaming) mới cài được (230MB push ~12s → "Success").
+        // ⚠️ `adb install` báo kết quả ở OUTPUT chứ không chỉ ở exit code: nhiều bản vẫn
+        //    exit 0 dù thất bại → PHẢI đọc output tìm "Success", không tin mỗi status.
+        //    Bắt cả stderr để báo lỗi rõ ràng (không đi qua adb() vì nó bỏ stderr khi exit 0).
+        // ⚠️ THỬ LẠI: ngay sau khi provision boot + áp android_id/debloat/harden, kết nối
+        //    adb hay bị "failed to read copy response" (rớt lúc commit dù push xong 230MB).
+        //    Đây là lỗi CHỚP NHOÁNG — thử lại vài lần (chờ VM lắng) là ăn (kiểm chứng thực).
+        let arg = format!("install -r -g --no-streaming \"{apk_path}\"");
+        const MAX_TRIES: u32 = 3;
+        let mut last = String::new();
+        for attempt in 1..=MAX_TRIES {
+            let mut cmd = Command::new(&self.memuc_path);
+            cmd.args(["-i", &idx.to_string(), "adb", &arg]);
+            cmd.kill_on_drop(true);
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let output = timeout(ADB_TIMEOUT, cmd.output())
+                .await
+                .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))??;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stdout.contains("Success") || stderr.contains("Success") {
+                return Ok(());
+            }
+            last = format!("out={}, err={}", stdout.trim(), stderr.trim());
+            tracing::warn!(idx, attempt, max = MAX_TRIES, "adb install lỗi, thử lại: {last}");
+            if attempt < MAX_TRIES {
+                sleep(Duration::from_secs(4)).await;
+            }
+        }
+        Err(AppError::CommandFailed(format!(
+            "adb install thất bại sau {MAX_TRIES} lần: {last}"
+        )))
     }
 
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()> {

@@ -28,7 +28,8 @@ use crate::error::{AppError, AppResult};
 use crate::geo::{IpGeolocator, MockGeolocator};
 use crate::memuc::RealMemuc;
 use crate::model::{
-    AppSettings, EmulatorTell, HardwareProfile, SnapshotMeta, DEFAULT_TIKTOK_APK, TIKTOK_PKG,
+    AccountProfile, AppSettings, EmulatorTell, HardwareProfile, SnapshotMeta, DEFAULT_TIKTOK_APK,
+    TIKTOK_PKG,
 };
 use crate::orchestrator;
 use crate::snapshot::LocalSnapshotStore;
@@ -84,6 +85,18 @@ fn hw_new() -> HardwareProfile {
         device: "oriole".into(),
         build_fingerprint: "google/oriole/oriole:12/SD1A.210817.036/7805805:user/release-keys"
             .into(),
+    }
+}
+
+/// AccountProfile tối thiểu cho test profile (chỉ cần username; creds để rỗng).
+fn acc(username: &str) -> AccountProfile {
+    AccountProfile {
+        tiktok_username: username.into(),
+        tiktok_password: String::new(),
+        two_fa: String::new(),
+        tiktok_passkey: String::new(),
+        email: String::new(),
+        email_password: String::new(),
     }
 }
 
@@ -440,7 +453,7 @@ async fn a4_provision_fingerprint_inject() {
     let guard = VmGuard::new(mp.clone());
 
     let before = index_set(&state).await;
-    let idx = orchestrator::provision(&state, "acc_fp", &hw())
+    let idx = orchestrator::provision(&state, "acc_fp", &hw(), None)
         .await
         .expect("provision");
     guard.track(idx);
@@ -667,7 +680,7 @@ async fn a8_swap_account_running_vm() {
     let guard = VmGuard::new(mp.clone());
 
     let before = index_set(&state).await;
-    let idx = orchestrator::provision(&state, "acc_old", &hw())
+    let idx = orchestrator::provision(&state, "acc_old", &hw(), None)
         .await
         .expect("provision acc_old");
     guard.track(idx);
@@ -767,7 +780,7 @@ async fn a9_full_disposable_roundtrip() {
     let payload = format!("MPM-MARKER-{nonce}");
 
     // --- Phiên 1 ---
-    let idx1 = orchestrator::provision(&state, "acc_e2e", &hw())
+    let idx1 = orchestrator::provision(&state, "acc_e2e", &hw(), None)
         .await
         .expect("provision phiên 1");
     guard.track(idx1);
@@ -830,7 +843,7 @@ async fn a9_full_disposable_roundtrip() {
     );
 
     // --- Phiên 2 ---
-    let idx2 = orchestrator::provision(&state, "acc_e2e", &hw())
+    let idx2 = orchestrator::provision(&state, "acc_e2e", &hw(), None)
         .await
         .expect("provision phiên 2");
     guard.track(idx2);
@@ -980,7 +993,7 @@ async fn a10_r15_backup_fail_vm_not_destroyed() {
     let before = index_set(&state).await;
 
     // provision không gọi backup → vẫn chạy.
-    let idx = orchestrator::provision(&state, "acc_r15", &hw())
+    let idx = orchestrator::provision(&state, "acc_r15", &hw(), None)
         .await
         .expect("provision (không dùng backup)");
     guard.track(idx);
@@ -1036,7 +1049,7 @@ async fn a11_snapshot_integrity_retention() {
     assert_eq!(orchestrator::SNAPSHOT_RETENTION, 5, "hằng retention phải 5");
 
     let before = index_set(&state).await;
-    let idx = orchestrator::provision(&state, "acc_ret", &hw())
+    let idx = orchestrator::provision(&state, "acc_ret", &hw(), None)
         .await
         .expect("provision");
     guard.track(idx);
@@ -1128,6 +1141,156 @@ async fn a11_snapshot_integrity_retention() {
     let _ = state.memuc.stop(idx).await;
     let _ = state.memuc.remove(idx).await;
     guard.untrack(idx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A.12 — Vòng đời PROFILE trên MEmu THẬT qua `profile_ops` (đúng code production
+/// của run_profile/stop_profile): create (KHÔNG VM) → run (provision + CÀI TIKTOK +
+/// đăng ký running) → stop (backup + hủy VM; profile bền). Đóng khoảng trống #4 cho
+/// lớp profile-centric + chứng minh provision nay cài TikTok đúng thứ tự (trước restore).
+#[tokio::test]
+#[ignore]
+async fn a12_profile_lifecycle_real() {
+    if !memu_available() {
+        eprintln!("[skip] Không có MEmu");
+        return;
+    }
+    // Cần APK thật để provision cài TikTok (đường dẫn mặc định).
+    if !std::path::Path::new(DEFAULT_TIKTOK_APK).exists() {
+        eprintln!("[skip] Không có APK tại {DEFAULT_TIKTOK_APK}");
+        return;
+    }
+    let (state, dir) = make_state("a12").await;
+    let mp = memuc_path();
+    let guard = VmGuard::new(mp.clone());
+
+    let before = index_set(&state).await;
+
+    // 1) create: CHỈ ghi dữ liệu, KHÔNG tạo VM.
+    let username =
+        crate::profile_ops::create(&state, acc("acc_prof"), Some("ghi chú test".into()), None)
+            .await
+            .expect("create profile");
+    assert_eq!(username, "acc_prof");
+    let p = state.get_profile("acc_prof").await.expect("profile tồn tại");
+    assert!(p.last_run_at.is_none(), "chưa chạy → last_run_at None");
+    assert!(
+        state.running_vm_of("acc_prof").await.is_none(),
+        "create không đăng ký VM"
+    );
+    assert_eq!(
+        index_set(&state).await,
+        before,
+        "create_profile KHÔNG được tạo VM"
+    );
+    let want_aid = p.hardware.android_id.clone();
+
+    // 2) run: provision VM + cài TikTok + đăng ký running.
+    let idx = crate::profile_ops::run(&state, "acc_prof")
+        .await
+        .expect("run profile");
+    guard.track(idx);
+    assert_new_index(&before, idx);
+    assert_eq!(
+        state.running_vm_of("acc_prof").await,
+        Some(idx),
+        "running map trỏ đúng VM"
+    );
+    // list phản ánh running_vm.
+    let views = crate::profile_ops::list(&state).await;
+    let view = views
+        .iter()
+        .find(|v| v.profile.username == "acc_prof")
+        .expect("profile có trong list");
+    assert_eq!(view.running_vm, Some(idx), "ProfileView.running_vm = idx");
+    assert!(
+        state
+            .get_profile("acc_prof")
+            .await
+            .unwrap()
+            .last_run_at
+            .is_some(),
+        "last_run_at set sau run"
+    );
+
+    // VM thật: boot xong + android_id = fingerprint CỦA PROFILE (sinh khi create).
+    assert_eq!(
+        getprop(&mp, idx, "sys.boot_completed"),
+        "1",
+        "VM phải boot xong"
+    );
+    // android_id: áp được & BỀN khi CHƯA cài app (đã chứng minh ở a4). NHƯNG sau khi CÀI
+    // + CHẠY TikTok, MEmu/GMS ghi đè android_id (Android 8+ cấp id theo app; GMS tự quản
+    // android_id) → KHÔNG assert cứng (cùng lớp known-gap với model override; cần
+    // Magisk/resetprop mới khóa được — user đã bỏ #2). Chỉ cảnh báo để theo dõi.
+    let aid = vm_shell(&mp, idx, "settings get secure android_id");
+    let aid_token = aid.split_whitespace().last().unwrap_or("");
+    if aid_token != want_aid {
+        eprintln!(
+            "[known-gap] android_id hậu-cài+chạy TikTok KHÔNG khớp giá trị áp: \
+             runtime={aid_token} applied={want_aid} — MEmu/GMS ghi đè android_id \
+             (cần Magisk/resetprop mới khóa; xem docs/E2E_RUNBOOK.md)."
+        );
+    }
+    // TikTok đã được provision cài (bằng chứng khoảng trống #4 đã fix — provision cài app).
+    let pkgs = vm_adb_raw(&mp, idx, &format!("shell pm list packages {TIKTOK_PKG}"));
+    assert!(
+        pkgs.contains(&format!("package:{TIKTOK_PKG}")),
+        "run_profile phải cài TikTok trong provision: {pkgs}"
+    );
+
+    // 3) run lần 2 khi đang chạy → idempotent, KHÔNG tạo VM mới.
+    let idx_again = crate::profile_ops::run(&state, "acc_prof")
+        .await
+        .expect("run lần 2");
+    assert_eq!(idx_again, idx, "run khi đang chạy trả VM hiện tại");
+    // Chỉ xét index MỚI so với `before` (không đếm tổng toàn cục — bền với VM có sẵn).
+    let new_indices: Vec<u32> = {
+        let mut v: Vec<u32> = index_set(&state).await.difference(&before).copied().collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        new_indices,
+        vec![idx],
+        "run lần 2 KHÔNG tạo thêm VM (chỉ {idx} là mới)"
+    );
+
+    // 4) stop: backup + hủy VM + nhả running. PROFILE vẫn còn (dữ liệu bền).
+    let rec = crate::profile_ops::stop(&state, "acc_prof")
+        .await
+        .expect("stop profile");
+    guard.untrack(idx);
+    let rec = rec.expect("stop trả snapshot record");
+    assert_eq!(rec.sha256.len(), 64, "sha256 64 hex");
+    assert!(rec.size_bytes > 0, "size_bytes > 0");
+    assert!(
+        !index_set(&state).await.contains(&idx),
+        "VM bị hủy sau stop (disposable)"
+    );
+    assert!(
+        state.running_vm_of("acc_prof").await.is_none(),
+        "running map đã nhả sau stop"
+    );
+    assert!(
+        state.get_profile("acc_prof").await.is_some(),
+        "PROFILE vẫn tồn tại sau stop (dữ liệu bền)"
+    );
+    let db = state.db.as_ref().unwrap();
+    assert!(
+        db.latest_snapshot("acc_prof").unwrap().is_some(),
+        "snapshot lưu theo username"
+    );
+
+    // 5) stop lần 2 khi không chạy → Ok(None) (idempotent).
+    assert!(
+        crate::profile_ops::stop(&state, "acc_prof")
+            .await
+            .expect("stop idempotent")
+            .is_none(),
+        "stop khi không chạy phải None"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

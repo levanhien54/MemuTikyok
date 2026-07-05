@@ -15,6 +15,7 @@ mod memuc;
 mod model;
 mod orchestrator;
 mod poller;
+mod profile_ops;
 mod queue;
 mod runner;
 mod snapshot;

@@ -120,19 +120,51 @@ pub async fn backup_and_record(
 }
 
 /// Cấp phát một VM mới cho `account_key`: tạo sạch → áp hardware → start →
-/// restore snapshot mới nhất (nếu có). Trả về index VM đã sẵn sàng làm việc.
+/// (cài TikTok nếu có `apk_path`) → restore snapshot mới nhất (nếu có). Trả về
+/// index VM đã sẵn sàng làm việc.
+///
+/// `apk_path = Some(...)` → cài APK TikTok TRƯỚC bước restore. Bắt buộc cho luồng
+/// dùng-thật (profile) vì: (1) lần đầu chưa có session → cần app để đăng nhập;
+/// (2) restore giải nén vào `/data/data/<pkg>` nên package PHẢI được cài trước.
+/// `None` → bỏ qua cài (các test fingerprint-only tự lo APK khi cần).
 pub async fn provision(
     state: &SharedState,
     account_key: &str,
     hw: &HardwareProfile,
+    apk_path: Option<&str>,
 ) -> AppResult<u32> {
     // 1) Tạo VM mới tinh và xác định index của nó (an toàn tái dùng index/đua tranh).
     let index = create_vm(state).await?;
 
-    // 2) Áp hồ sơ phần cứng + độ phân giải (nhất quán fingerprint — R-12).
+    // 2..4) Chuẩn bị VM. NGUYÊN TỬ: nếu BẤT KỲ bước nào lỗi → HỦY VM vừa tạo. VM đã
+    // được tạo nhưng CHƯA trả về caller nên không ai teardown được nó — nếu không dọn
+    // ở đây thì rò "VM mồ côi" (chạy nhưng không nằm trong running map → không tính vào
+    // cổng tối đa 5 → tích tụ, ngốn RAM/đĩa). Đối xứng R-15 (teardown chỉ hủy sau backup).
+    match provision_prepare(state, index, account_key, hw, apk_path).await {
+        Ok(()) => Ok(index),
+        Err(e) => {
+            let _ = state.memuc.stop(index).await;
+            let _ = state.memuc.remove(index).await;
+            state.forget(index).await;
+            Err(e)
+        }
+    }
+}
+
+/// Các bước chuẩn bị một VM ĐÃ tạo: áp hardware → boot → android_id → debloat →
+/// (cài app nếu có) → restore. Tách khỏi `provision` để bọc dọn-dẹp-khi-lỗi (mọi
+/// `?` ở đây khiến provision hủy VM thay vì rò).
+async fn provision_prepare(
+    state: &SharedState,
+    index: u32,
+    account_key: &str,
+    hw: &HardwareProfile,
+    apk_path: Option<&str>,
+) -> AppResult<()> {
+    // Áp hồ sơ phần cứng + độ phân giải (nhất quán fingerprint — R-12).
     apply_hw_config(state, index, hw).await?;
 
-    // 3) Start → chờ boot → áp android_id → gỡ app thừa mặc định.
+    // Start → chờ boot → áp android_id → gỡ app thừa mặc định.
     state.queue.run(state.memuc.start(index)).await?;
     state.mark_launched(index).await;
     state.adb.wait_boot_completed(index).await?;
@@ -142,7 +174,13 @@ pub async fn provision(
     let _ = state.adb.lock_device_identity(index, hw).await;
     auto_debloat(state, index).await;
 
-    // 4) Restore snapshot mới nhất nếu có (verify sha256 trước).
+    // Cài TikTok TRƯỚC restore (pkg phải tồn tại để restore ghi /data/data/<pkg>).
+    // Idempotent (`install_apk -r`). Bắt buộc thành công cho luồng profile.
+    if let Some(apk) = apk_path {
+        state.adb.install_apk(index, apk).await?;
+    }
+
+    // Restore snapshot mới nhất nếu có (verify sha256 trước).
     if let Some(db) = &state.db {
         if let Some(rec) = db.latest_snapshot(account_key)? {
             if state.store.verify(&rec.storage_key, &rec.sha256).await? {
@@ -157,7 +195,7 @@ pub async fn provision(
         }
     }
 
-    Ok(index)
+    Ok(())
 }
 
 /// Clone từ **base image** (đã debloat + TikTok + config) rồi áp fingerprint RIÊNG
@@ -488,7 +526,7 @@ mod tests {
     async fn provision_goi_khoa_model() {
         // provision phải gọi lock_device_identity (khóa model post-boot) với model đúng.
         let (state, _m, adb) = make_state("lock");
-        let idx = provision(&state, "acc_lock", &hw()).await.unwrap();
+        let idx = provision(&state, "acc_lock", &hw(), None).await.unwrap();
         assert_eq!(
             adb.locked_model_of(idx).as_deref(),
             Some("FRD-L19"),
@@ -499,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn provision_ap_hardware_va_android_id() {
         let (state, memuc, adb) = make_state("hw");
-        let idx = provision(&state, "acc1", &hw()).await.unwrap();
+        let idx = provision(&state, "acc1", &hw(), None).await.unwrap();
 
         // Config phần cứng được áp qua memuc.
         assert_eq!(
@@ -524,7 +562,7 @@ mod tests {
         let (state, _memuc, adb) = make_state("cycle");
 
         // Phiên 1: cấp phát, ghi dữ liệu, kết thúc (backup + hủy).
-        let idx1 = provision(&state, "acc1", &hw()).await.unwrap();
+        let idx1 = provision(&state, "acc1", &hw(), None).await.unwrap();
         adb.set_device_data(idx1, b"session-A".to_vec());
         teardown(&state, idx1, "acc1").await.unwrap();
 
@@ -537,7 +575,7 @@ mod tests {
         adb.clear_devices();
 
         // Phiên 2: cấp phát lại → phải restore dữ liệu phiên 1 từ kho.
-        let idx2 = provision(&state, "acc1", &hw()).await.unwrap();
+        let idx2 = provision(&state, "acc1", &hw(), None).await.unwrap();
         assert_eq!(adb.device_data(idx2).as_deref(), Some(&b"session-A"[..]));
     }
 
