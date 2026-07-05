@@ -79,24 +79,6 @@ export function createTauriBackend(): Backend {
     saveSettings(settings) {
       return invoke<AppSettings>('save_settings', { settings });
     },
-    getPoolSize() {
-      return invoke<number>('warm_pool_size');
-    },
-    refillPool(baseIndex, target) {
-      return invoke<number>('warm_pool_refill', { baseIndex, target });
-    },
-    provisionSession(accountKey, hardware) {
-      return invoke<number>('provision_session', { accountKey, hardware });
-    },
-    acquireFromPool(baseIndex, accountKey, hardware) {
-      return invoke<number>('warm_pool_acquire', { baseIndex, accountKey, hardware });
-    },
-    swapAccount(index, accountKey, hardware) {
-      return invoke<void>('swap_account', { index, accountKey, hardware });
-    },
-    teardownSession(index, accountKey) {
-      return invoke<SnapshotRecord>('teardown_session', { index, accountKey });
-    },
     runWatchSession(index) {
       return invoke<void>('run_watch_session', { index });
     },

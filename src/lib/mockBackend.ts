@@ -91,8 +91,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
   layout: 'list',
   tiktokApkPath: null,
-  warmPoolTarget: 0,
-  poolBaseIndex: null,
 };
 
 const META_KEY = 'mpm.meta.v1';
@@ -376,42 +374,6 @@ export function createMockBackend(): Backend {
       const snaps = loadSnaps();
       const record = snaps[accountKey];
       if (!record) throw new Error('Chưa có snapshot cho tài khoản này');
-      return record;
-    },
-    async getPoolSize() {
-      return Number(localStorage.getItem('mpm.pool') || 0);
-    },
-    async refillPool(_baseIndex: number, target: number) {
-      // Mô phỏng: pool đạt target ngay (bản thật clone + boot nền).
-      localStorage.setItem('mpm.pool', String(target));
-      return target;
-    },
-    async provisionSession(accountKey: string, _hardware: HardwareProfile) {
-      // Mô phỏng: cấp VM sạch cho tài khoản → trả vm_index kế tiếp.
-      const idx = instances.length ? Math.max(...instances.map((i) => i.index)) + 1 : 0;
-      transition(idx, 'starting', 'running');
-      void accountKey;
-      return idx;
-    },
-    async acquireFromPool(_baseIndex: number, accountKey: string, _hardware: HardwareProfile) {
-      // Mô phỏng: lấy 1 VM từ pool (giảm pool) rồi swap tài khoản vào.
-      const pool = Number(localStorage.getItem('mpm.pool') || 0);
-      if (pool > 0) localStorage.setItem('mpm.pool', String(pool - 1));
-      const idx = instances.find((i) => i.status === 'stopped')?.index ?? 0;
-      const snaps = loadSnaps();
-      void snaps[accountKey];
-      transition(idx, 'starting', 'running');
-      return idx;
-    },
-    async swapAccount(index: number, accountKey: string, _hardware: HardwareProfile) {
-      // Mô phỏng: flash sạch + nạp fingerprint + restore → khởi chạy nhanh.
-      void accountKey;
-      transition(index, 'starting', 'running', 700);
-    },
-    async teardownSession(index: number, accountKey: string) {
-      // Mô phỏng: backup session rồi hủy VM (disposable).
-      const record = await makeSnapshot(index, accountKey);
-      transition(index, 'stopping', 'stopped');
       return record;
     },
     async getSettings() {

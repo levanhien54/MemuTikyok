@@ -78,29 +78,6 @@ export function SettingsView() {
           />
         </Field>
 
-        <Field label="Số VM giữ nóng (warm pool)" hint="0 = tắt. >0 = tự động clone base + boot sẵn nền để lấy tức thì.">
-          <input
-            type="number"
-            min={0}
-            max={10}
-            value={settings.warmPoolTarget}
-            onChange={(e) => void save({ warmPoolTarget: Number(e.target.value) })}
-            className="h-9 w-32 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
-          />
-        </Field>
-
-        <Field label="VM base cho pool" hint="Index VM base (đã debloat + TikTok) để clone vào pool.">
-          <input
-            type="number"
-            min={0}
-            placeholder="chưa đặt"
-            value={settings.poolBaseIndex ?? ''}
-            onChange={(e) =>
-              void save({ poolBaseIndex: e.target.value === '' ? null : Number(e.target.value) })
-            }
-            className="h-9 w-32 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
-          />
-        </Field>
 
         <Field label="Giao diện">
           <div className="flex gap-2">

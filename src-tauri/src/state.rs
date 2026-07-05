@@ -1,7 +1,7 @@
 //! State dùng chung của ứng dụng (§8.3 SRS). Giữ adapter memuc, hàng đợi lệnh,
 //! registry instance, settings, metadata (persist SQLite) và geolocator.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -56,9 +56,7 @@ pub struct AppState {
     pub metadata: Mutex<HashMap<u32, InstanceMeta>>,
     /// Kết nối SQLite; None nếu không mở được (fallback chỉ-bộ-nhớ).
     pub db: Option<Db>,
-    /// Warm pool: các VM đã clone + boot sẵn, chờ gán tài khoản (0s cold-boot).
-    pub pool: Mutex<VecDeque<u32>>,
-    /// Khóa tuần tự hóa thao tác "tạo/clone VM rồi nhận diện index mới" — tránh
+    /// Khóa tuần tự hóa thao tác "tạo VM rồi nhận diện index mới" — tránh
     /// hai lần tạo song song cùng chọn nhầm một index (race + tái dùng index).
     pub create_lock: Mutex<()>,
     /// VM đang chạy phiên automation — chặn phiên TRÙNG trên cùng VM.
@@ -100,7 +98,6 @@ impl AppState {
             settings: Mutex::new(settings),
             metadata: Mutex::new(metadata),
             db,
-            pool: Mutex::new(VecDeque::new()),
             create_lock: Mutex::new(()),
             running_sessions: Mutex::new(HashSet::new()),
             profiles: Mutex::new(profiles),
@@ -224,26 +221,6 @@ impl AppState {
         self.persist(index, &entry);
     }
 
-    pub async fn set_account(&self, index: u32, account: AccountProfile) {
-        let entry = {
-            let mut meta = self.metadata.lock().await;
-            let e = meta.entry(index).or_default();
-            e.account = Some(account);
-            e.clone()
-        };
-        self.persist(index, &entry);
-    }
-
-    pub async fn set_hardware(&self, index: u32, hardware: HardwareProfile) {
-        let entry = {
-            let mut meta = self.metadata.lock().await;
-            let e = meta.entry(index).or_default();
-            e.hardware = Some(hardware);
-            e.clone()
-        };
-        self.persist(index, &entry);
-    }
-
     /// Lấy fingerprint đã lưu của một VM (để áp lại khi khởi chạy).
     pub async fn hardware_of(&self, index: u32) -> Option<HardwareProfile> {
         self.metadata
@@ -251,39 +228,6 @@ impl AppState {
             .await
             .get(&index)
             .and_then(|m| m.hardware.clone())
-    }
-
-    pub async fn set_note(&self, index: u32, note: String) {
-        let entry = {
-            let mut meta = self.metadata.lock().await;
-            let e = meta.entry(index).or_default();
-            e.note = note;
-            e.clone()
-        };
-        self.persist(index, &entry);
-    }
-
-    /// Gán country tường minh (người dùng nhập lúc tạo VM). Chuỗi rỗng → None.
-    pub async fn set_country(&self, index: u32, country: Option<String>) {
-        let country = country
-            .map(|c| c.trim().to_uppercase())
-            .filter(|c| !c.is_empty());
-        let entry = {
-            let mut meta = self.metadata.lock().await;
-            let e = meta.entry(index).or_default();
-            e.country = country;
-            e.clone()
-        };
-        self.persist(index, &entry);
-    }
-
-    /// Quốc gia đã lưu của VM (quốc gia yêu cầu, để đối chiếu khi khởi chạy).
-    pub async fn country_of(&self, index: u32) -> Option<String> {
-        self.metadata
-            .lock()
-            .await
-            .get(&index)
-            .and_then(|m| m.country.clone())
     }
 
     /// Chỉ gán country nếu chưa có; trả về true nếu vừa cập nhật.

@@ -69,25 +69,6 @@ fn hw() -> HardwareProfile {
     }
 }
 
-/// Fingerprint KHÁC hoàn toàn cho luồng swap (chứng minh cách ly chéo R-12).
-fn hw_new() -> HardwareProfile {
-    HardwareProfile {
-        model: "Pixel 6".into(),
-        brand: "google".into(),
-        manufacturer: "Google".into(),
-        // IMEI hợp lệ Luhn khác.
-        imei: "356938035643809".into(),
-        android_id: "ffeeddccbbaa".into(),
-        mac: "02:00:00:aa:bb:cc".into(),
-        res_width: 1080,
-        res_height: 2400,
-        dpi: 420,
-        device: "oriole".into(),
-        build_fingerprint: "google/oriole/oriole:12/SD1A.210817.036/7805805:user/release-keys"
-            .into(),
-    }
-}
-
 /// AccountProfile tối thiểu cho test profile (chỉ cần username; creds để rỗng).
 fn acc(username: &str) -> AccountProfile {
     AccountProfile {
@@ -100,22 +81,12 @@ fn acc(username: &str) -> AccountProfile {
     }
 }
 
-/// Geolocator trả về quốc gia cố định (hoặc None) — cần thiết vì
-/// `MockGeolocator.country("")` trả None (gây CountryUnverified giả).
-struct FixedGeo(Option<&'static str>);
-#[async_trait]
-impl IpGeolocator for FixedGeo {
-    async fn country(&self, _ip: &str) -> Option<String> {
-        self.0.map(|s| s.to_string())
-    }
-}
-
 /// Tạo SharedState với adapter THẬT + thư mục temp riêng (không đụng %APPDATA%).
 async fn make_state(tag: &str) -> (SharedState, PathBuf) {
     make_state_geo(tag, Arc::new(MockGeolocator)).await
 }
 
-/// Như `make_state` nhưng cho phép chọn geolocator (dùng cho cổng quốc gia).
+/// Như `make_state` nhưng cho phép chọn geolocator (giữ cho linh hoạt tương lai).
 async fn make_state_geo(tag: &str, geo: Arc<dyn IpGeolocator>) -> (SharedState, PathBuf) {
     let mp = memuc_path();
     let dir = std::env::temp_dir().join(format!("mpm_e2e_{}_{tag}", std::process::id()));
@@ -330,48 +301,6 @@ async fn a1_create_vm_new_index() {
     assert!(list.iter().any(|v| v.index == 0), "VM 0 phải còn tồn tại");
 }
 
-/// A.2 — Cổng quốc gia (tất định, KHÔNG tạo VM, KHÔNG mạng).
-#[tokio::test]
-#[ignore]
-async fn a2_country_gate() {
-    // Không cần MEmu: assert_country_match chỉ dùng geo + state.country_of.
-    // Case A — skip: FixedGeo(None), không set country.
-    {
-        let (state, _dir) = make_state_geo("a2_skip", Arc::new(FixedGeo(None))).await;
-        assert!(
-            orchestrator::assert_country_match(&state, 0).await.is_ok(),
-            "không yêu cầu quốc gia → không chặn"
-        );
-    }
-    // Case B — match (không phân biệt hoa/thường; set_country uppercases).
-    {
-        let (state, _dir) = make_state_geo("a2_ok", Arc::new(FixedGeo(Some("VN")))).await;
-        state.set_country(0, Some("vn".into())).await;
-        assert!(orchestrator::assert_country_match(&state, 0).await.is_ok());
-    }
-    // Case C — mismatch.
-    {
-        let (state, _dir) = make_state_geo("a2_bad", Arc::new(FixedGeo(Some("VN")))).await;
-        state.set_country(0, Some("US".into())).await;
-        match orchestrator::assert_country_match(&state, 0).await {
-            Err(AppError::CountryMismatch { actual, expected }) => {
-                assert_eq!(actual, "VN");
-                assert_eq!(expected, "US");
-            }
-            other => panic!("phải CountryMismatch, nhận {other:?}"),
-        }
-    }
-    // Case D — unverified.
-    {
-        let (state, _dir) = make_state_geo("a2_unv", Arc::new(FixedGeo(None))).await;
-        state.set_country(0, Some("VN".into())).await;
-        match orchestrator::assert_country_match(&state, 0).await {
-            Err(AppError::CountryUnverified(cc)) => assert_eq!(cc, "VN"),
-            other => panic!("phải CountryUnverified, nhận {other:?}"),
-        }
-    }
-}
-
 /// A.3 — Snapshot hỏng bị `verify` từ chối (nhánh chỉ-store, không VM).
 #[tokio::test]
 #[ignore]
@@ -559,55 +488,6 @@ async fn a4_provision_fingerprint_inject() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A.5 — launch_instance nạp lại fingerprint từ DB (không snapshot → restored=false).
-#[tokio::test]
-#[ignore]
-async fn a5_launch_reload_fingerprint() {
-    if !memu_available() {
-        eprintln!("[skip] Không có MEmu");
-        return;
-    }
-    let (state, dir) = make_state("a5").await;
-    let mp = memuc_path();
-    let guard = VmGuard::new(mp.clone());
-
-    let before = index_set(&state).await;
-    let idx = orchestrator::create_vm(&state).await.expect("create_vm");
-    guard.track(idx);
-    assert_new_index(&before, idx);
-
-    // Ghi fingerprint xuống SQLite (write-through). KHÔNG set_country (bỏ cổng).
-    state.set_hardware(idx, hw()).await;
-    assert!(
-        state.hardware_of(idx).await.is_some(),
-        "fingerprint phải có trong DB trước khi launch"
-    );
-
-    // Cài TikTok trước để start_app cuối của launch_instance không fail.
-    state
-        .adb
-        .install_apk(idx, DEFAULT_TIKTOK_APK)
-        .await
-        .expect("install_apk");
-
-    let restored = orchestrator::launch_instance(&state, idx, "acc_launch")
-        .await
-        .expect("launch_instance không được Err");
-    assert!(!restored, "chưa có snapshot → restored=false");
-
-    assert_eq!(getprop(&mp, idx, "sys.boot_completed"), "1");
-    let aid = vm_shell(&mp, idx, "settings get secure android_id");
-    assert!(
-        aid.contains("a1b2c3d4e5f6"),
-        "DB reload + re-apply android_id: {aid}"
-    );
-
-    let _ = state.memuc.stop(idx).await;
-    let _ = state.memuc.remove(idx).await;
-    guard.untrack(idx);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// A.6 — cài APK TikTok có mặt.
 #[tokio::test]
 #[ignore]
@@ -660,96 +540,6 @@ async fn a6_install_tiktok_apk() {
         .start_app(idx, TIKTOK_PKG)
         .await
         .expect("start_app");
-
-    let _ = state.memuc.stop(idx).await;
-    let _ = state.memuc.remove(idx).await;
-    guard.untrack(idx);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A.8 — swap_account trên VM đang chạy (cách ly chéo R-12).
-#[tokio::test]
-#[ignore]
-async fn a8_swap_account_running_vm() {
-    if !memu_available() {
-        eprintln!("[skip] Không có MEmu");
-        return;
-    }
-    let (state, dir) = make_state("a8").await;
-    let mp = memuc_path();
-    let guard = VmGuard::new(mp.clone());
-
-    let before = index_set(&state).await;
-    let idx = orchestrator::provision(&state, "acc_old", &hw(), None)
-        .await
-        .expect("provision acc_old");
-    guard.track(idx);
-    assert_new_index(&before, idx);
-
-    // Cài TikTok để có /data/data/<pkg> + start_app hoạt động.
-    state
-        .adb
-        .install_apk(idx, DEFAULT_TIKTOK_APK)
-        .await
-        .expect("install_apk");
-    state
-        .adb
-        .start_app(idx, TIKTOK_PKG)
-        .await
-        .expect("start_app");
-
-    // Ghi marker E2E-NEW → backup thành snapshot acc_new.
-    let marker = format!("/data/data/{TIKTOK_PKG}/files/mpm_marker.txt");
-    vm_shell(
-        &mp,
-        idx,
-        &format!("mkdir -p /data/data/{TIKTOK_PKG}/files && echo E2E-NEW > {marker}"),
-    );
-    orchestrator::backup_and_record(&state, idx, "acc_new")
-        .await
-        .expect("backup acc_new");
-
-    // Ghi đè marker về E2E-OLD (trạng thái tài khoản cũ).
-    vm_shell(&mp, idx, &format!("echo E2E-OLD > {marker}"));
-    let pre = vm_shell(&mp, idx, &format!("cat {marker}"));
-    assert!(pre.contains("E2E-OLD"), "marker cũ phải là E2E-OLD: {pre}");
-
-    // Swap sang acc_new với fingerprint KHÁC (Pixel 6).
-    orchestrator::swap_account(&state, idx, "acc_new", &hw_new())
-        .await
-        .expect("swap_account");
-
-    // Marker: OLD bị pm clear, NEW được restore.
-    let after = vm_shell(&mp, idx, &format!("cat {marker}"));
-    assert!(
-        after.contains("E2E-NEW"),
-        "marker phải là E2E-NEW sau swap: {after}"
-    );
-    assert!(
-        !after.contains("E2E-OLD"),
-        "marker cũ E2E-OLD KHÔNG được còn: {after}"
-    );
-
-    // android_id mới (bằng chứng cross-check tin cậy nhất).
-    let aid = vm_shell(&mp, idx, "settings get secure android_id");
-    assert!(
-        aid.contains("ffeeddccbbaa"),
-        "android_id phải là của hw_new: {aid}"
-    );
-
-    // ro.product.model — swap CÓ reboot nên ro.* đọc lại được.
-    let model = getprop(&mp, idx, "ro.product.model");
-    if !model.contains("Pixel 6") {
-        let cfg = getconfigex(&mp, idx, "microvirt_vm_model");
-        eprintln!("[soft] ro.product.model={model:?}; getconfigex={cfg:?}");
-        assert!(cfg.contains("Pixel 6"), "khóa memuc model phải là Pixel 6");
-    }
-
-    // swap không tạo/hủy VM nào.
-    assert!(
-        index_set(&state).await.contains(&idx),
-        "VM vẫn tồn tại sau swap"
-    );
 
     let _ = state.memuc.stop(idx).await;
     let _ = state.memuc.remove(idx).await;
@@ -922,9 +712,6 @@ impl AdbWorker for FailingBackupAdb {
     async fn apply_android_id(&self, idx: u32, android_id: &str) -> AppResult<()> {
         self.0.apply_android_id(idx, android_id).await
     }
-    async fn wipe_app(&self, idx: u32, pkg: &str) -> AppResult<()> {
-        self.0.wipe_app(idx, pkg).await
-    }
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()> {
         self.0.wait_boot_completed(idx).await
     }
@@ -936,9 +723,6 @@ impl AdbWorker for FailingBackupAdb {
     }
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()> {
         self.0.disable_app(idx, pkg).await
-    }
-    async fn list_third_party_apps(&self, idx: u32) -> AppResult<Vec<String>> {
-        self.0.list_third_party_apps(idx).await
     }
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>> {
         self.0.scan_emulator_tells(idx).await

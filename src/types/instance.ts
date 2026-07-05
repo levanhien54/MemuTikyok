@@ -130,10 +130,6 @@ export interface AppSettings {
   layout: 'grid' | 'list';
   /** Đường dẫn APK TikTok (null = dùng mặc định). */
   tiktokApkPath: string | null;
-  /** Số VM giữ nóng trong warm pool (0 = tắt tự động). */
-  warmPoolTarget: number;
-  /** VM base để clone vào pool (null = chưa cấu hình). */
-  poolBaseIndex: number | null;
 }
 
 /** Payload sự kiện đẩy từ backend (§8.4 SRS). */

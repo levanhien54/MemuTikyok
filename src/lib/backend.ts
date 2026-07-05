@@ -51,21 +51,6 @@ export interface Backend {
   getSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
 
-  /** Số VM đang nóng trong warm pool. */
-  getPoolSize(): Promise<number>;
-  /** Nạp warm pool tới `target` VM (clone từ `baseIndex`). Trả về số VM trong pool. */
-  refillPool(baseIndex: number, target: number): Promise<number>;
-
-  // ── Vòng đời "môi trường dùng-một-lần" (disposable) — §kiến trúc SRS ──
-  /** Provision VM sạch cho tài khoản: áp fingerprint + restore session. Trả về vm_index. */
-  provisionSession(accountKey: string, hardware: HardwareProfile): Promise<number>;
-  /** Lấy nhanh 1 VM đã nóng từ pool rồi swap tài khoản vào. Trả về vm_index. */
-  acquireFromPool(baseIndex: number, accountKey: string, hardware: HardwareProfile): Promise<number>;
-  /** Swap tài khoản trên VM đang chạy: flash sạch + nạp fingerprint + restore (khởi chạy nhanh). */
-  swapAccount(index: number, accountKey: string, hardware: HardwareProfile): Promise<void>;
-  /** Kết thúc phiên: backup session rồi hủy VM (disposable). Trả về snapshot vừa backup. */
-  teardownSession(index: number, accountKey: string): Promise<SnapshotRecord>;
-
   // ── Automation (warm-up "xem feed" giả người) ──
   /** Chạy phiên xem TikTok giả-người ở NỀN cho VM. Kết quả về qua subscribeAutomation. */
   runWatchSession(index: number): Promise<void>;

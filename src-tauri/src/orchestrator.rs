@@ -42,14 +42,6 @@ pub async fn create_vm(state: &SharedState) -> AppResult<u32> {
     identify_new(state, &before).await
 }
 
-/// Clone `base_index` và trả về index VM mới (an toàn với tái dùng index + đua tranh).
-pub async fn clone_vm(state: &SharedState, base_index: u32) -> AppResult<u32> {
-    let _guard = state.create_lock.lock().await;
-    let before = index_set(state).await?;
-    state.queue.run(state.memuc.clone_vm(base_index)).await?;
-    identify_new(state, &before).await
-}
-
 /// Gỡ app thừa + ẩn dấu vết ảo MẶC ĐỊNH (best-effort) khi chuẩn bị VM đã boot.
 async fn auto_debloat(state: &SharedState, index: u32) {
     for pkg in DEFAULT_BLOAT {
@@ -204,176 +196,6 @@ async fn provision_prepare(
     Ok(())
 }
 
-/// Clone từ **base image** (đã debloat + TikTok + config) rồi áp fingerprint RIÊNG
-/// cho tài khoản → nhanh hơn create + có sẵn app. Lưu fingerprint vào DB. Trả index mới.
-pub async fn clone_from_base(
-    state: &SharedState,
-    base_index: u32,
-    account_key: &str,
-    hw: &HardwareProfile,
-) -> AppResult<u32> {
-    let index = clone_vm(state, base_index).await?;
-
-    // Lưu fingerprint cho VM mới (để nạp lại lần sau) + áp ngay (gồm độ phân giải).
-    state.set_hardware(index, hw.clone()).await;
-    apply_hw_config(state, index, hw).await?;
-
-    state.queue.run(state.memuc.start(index)).await?;
-    state.mark_launched(index).await;
-    state.adb.wait_boot_completed(index).await?;
-    state.adb.apply_android_id(index, &hw.android_id).await?;
-    // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
-    // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
-    let _ = state.adb.lock_device_identity(index, hw).await;
-    auto_debloat(state, index).await;
-
-    if let Some(db) = &state.db {
-        if let Some(rec) = db.latest_snapshot(account_key)? {
-            if state.store.verify(&rec.storage_key, &rec.sha256).await? {
-                let tmp =
-                    std::env::temp_dir().join(format!("mpm-clone-{index}-{}.tar.zst", now_ms()));
-                state.store.get(&rec.storage_key, &tmp).await?;
-                state.adb.restore(index, TIKTOK_PKG, &tmp).await?;
-                let _ = fs::remove_file(&tmp);
-            }
-        }
-    }
-    state.adb.start_app(index, TIKTOK_PKG).await?;
-    Ok(index)
-}
-
-/// Nạp **warm pool** tới `target` VM: clone base + boot sẵn (chờ trước, dùng sau →
-/// 0s cold-boot khi cần account mới). Trả về số VM hiện có trong pool.
-pub async fn pool_refill(state: &SharedState, base_index: u32, target: usize) -> AppResult<usize> {
-    while state.pool.lock().await.len() < target {
-        let index = clone_vm(state, base_index).await?;
-        state.memuc.set_config(index, "enable_su", "1").await?;
-        state.queue.run(state.memuc.start(index)).await?;
-        state.adb.wait_boot_completed(index).await?;
-        auto_debloat(state, index).await;
-        state.pool.lock().await.push_back(index);
-    }
-    Ok(state.pool.lock().await.len())
-}
-
-/// Lấy 1 VM **nóng** từ pool gán cho tài khoản (áp fingerprint riêng qua swap).
-/// Pool rỗng → fallback `clone_from_base`. Trả về index VM sẵn sàng.
-pub async fn pool_acquire(
-    state: &SharedState,
-    base_index: u32,
-    account_key: &str,
-    hw: &HardwareProfile,
-) -> AppResult<u32> {
-    let warm = { state.pool.lock().await.pop_front() };
-    match warm {
-        Some(index) => {
-            swap_account(state, index, account_key, hw).await?;
-            Ok(index)
-        }
-        None => clone_from_base(state, base_index, account_key, hw).await,
-    }
-}
-
-pub async fn pool_size(state: &SharedState) -> usize {
-    state.pool.lock().await.len()
-}
-
-/// Vòng lặp nền giữ warm pool luôn đủ `target` (opt-in qua settings; 0 = tắt).
-/// Chỉ chạy khi có `pool_base_index` và `warm_pool_target > 0`.
-pub async fn pool_maintainer(state: SharedState) {
-    use tokio::time::{interval, Duration};
-    let mut ticker = interval(Duration::from_secs(30));
-    loop {
-        ticker.tick().await;
-        let (target, base) = {
-            let s = state.settings.lock().await;
-            (s.warm_pool_target as usize, s.pool_base_index)
-        };
-        if target == 0 {
-            continue;
-        }
-        let Some(base) = base else { continue };
-        if let Err(e) = pool_refill(&state, base, target).await {
-            tracing::warn!(error = %e, "Warm pool refill nền thất bại");
-        }
-    }
-}
-
-/// Khởi chạy một VM có sẵn: **NẠP LẠI fingerprint đã lưu trong CSDL và áp** trước
-/// khi start (đúng yêu cầu: fingerprint lưu DB, nạp lại khi khởi chạy) → start →
-/// chờ boot → android_id → restore session → mở app. Trả về true nếu đã restore.
-/// Cổng kiểm tra quốc gia (FR): chỉ cho khởi chạy khi quốc gia IP thoát THỰC TẾ
-/// khớp quốc gia YÊU CẦU đã lưu trong CSDL. Bỏ qua nếu VM chưa đặt quốc gia yêu cầu.
-///
-/// Đã bỏ proxy per-VM → VM thoát mạng qua NAT của host, nên "IP thoát" = IP công
-/// khai của host (geolocator tự tra khi truyền IP rỗng). Nếu về sau có proxy/VPN
-/// ở tầng host thì IP công khai đã phản ánh đúng, logic không đổi.
-pub async fn assert_country_match(state: &SharedState, index: u32) -> AppResult<()> {
-    let Some(expected) = state.country_of(index).await else {
-        return Ok(()); // không yêu cầu quốc gia → không chặn
-    };
-    let expected = expected.trim().to_uppercase();
-    if expected.is_empty() {
-        return Ok(());
-    }
-    match state.geo.country("").await {
-        Some(actual) if actual.eq_ignore_ascii_case(&expected) => Ok(()),
-        Some(actual) => Err(AppError::CountryMismatch {
-            actual: actual.to_uppercase(),
-            expected,
-        }),
-        None => Err(AppError::CountryUnverified(expected)),
-    }
-}
-
-pub async fn launch_instance(
-    state: &SharedState,
-    index: u32,
-    account_key: &str,
-) -> AppResult<bool> {
-    // Cổng quốc gia TRƯỚC khi start (tránh khởi chạy vô ích nếu lệch định vị).
-    assert_country_match(state, index).await?;
-
-    let hw = state.hardware_of(index).await;
-
-    // Áp fingerprint + độ phân giải (khi VM còn dừng → ăn khi boot).
-    if let Some(hw) = &hw {
-        apply_hw_config(state, index, hw).await?;
-    }
-
-    state.queue.run(state.memuc.start(index)).await?;
-    state.mark_launched(index).await;
-
-    // LUÔN chờ Android boot xong trước mọi lệnh adb (restore/start_app) — kể cả khi
-    // không có fingerprint — nếu không adb sẽ chạy lúc thiết bị chưa sẵn sàng.
-    state.adb.wait_boot_completed(index).await?;
-
-    if let Some(hw) = &hw {
-        state.adb.apply_android_id(index, &hw.android_id).await?;
-        // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
-        // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
-        let _ = state.adb.lock_device_identity(index, hw).await;
-    }
-
-    // Restore session tài khoản (nếu có; verify sha256).
-    let mut restored = false;
-    if let Some(db) = &state.db {
-        if let Some(rec) = db.latest_snapshot(account_key)? {
-            if state.store.verify(&rec.storage_key, &rec.sha256).await? {
-                let tmp =
-                    std::env::temp_dir().join(format!("mpm-launch-{index}-{}.tar.zst", now_ms()));
-                state.store.get(&rec.storage_key, &tmp).await?;
-                state.adb.restore(index, TIKTOK_PKG, &tmp).await?;
-                let _ = fs::remove_file(&tmp);
-                restored = true;
-            }
-        }
-    }
-
-    state.adb.start_app(index, TIKTOK_PKG).await?;
-    Ok(restored)
-}
-
 /// Kết thúc phiên: backup dữ liệu về kho + CSDL, rồi HỦY VM (disposable).
 /// Chỉ hủy sau khi backup thành công (R-15).
 pub async fn teardown(
@@ -390,52 +212,6 @@ pub async fn teardown(
     state.forget(index).await;
 
     Ok(record)
-}
-
-/// Đổi tài khoản trên MỘT VM đang chạy (nhanh hơn tạo/hủy VM — theo yêu cầu tối ưu).
-/// Flash sạch app → áp fingerprint RIÊNG cho account mới → reboot (để ro.* ăn) →
-/// chờ boot → restore session → mở app. Fingerprint riêng chống liên kết chéo (R-12).
-pub async fn swap_account(
-    state: &SharedState,
-    index: u32,
-    account_key: &str,
-    hw: &HardwareProfile,
-) -> AppResult<()> {
-    // 1) Flash sạch dữ liệu app hiện tại (đăng xuất tài khoản cũ).
-    state.adb.wipe_app(index, TIKTOK_PKG).await?;
-
-    // 2) Áp hồ sơ phần cứng + độ phân giải riêng cho tài khoản mới.
-    apply_hw_config(state, index, hw).await?;
-
-    // 3) Reboot để model/fingerprint (ro.*) có hiệu lực.
-    state.queue.run(state.memuc.reboot(index)).await?;
-    state.mark_launched(index).await;
-
-    // 4) Chờ Android boot xong (thay sleep cố định → nhanh & chắc).
-    state.adb.wait_boot_completed(index).await?;
-
-    // 5) android_id (runtime) sau khi boot.
-    state.adb.apply_android_id(index, &hw.android_id).await?;
-    // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
-    // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
-    let _ = state.adb.lock_device_identity(index, hw).await;
-
-    // 6) Restore session tài khoản mới (nếu có; verify sha256 trước).
-    if let Some(db) = &state.db {
-        if let Some(rec) = db.latest_snapshot(account_key)? {
-            if state.store.verify(&rec.storage_key, &rec.sha256).await? {
-                let tmp =
-                    std::env::temp_dir().join(format!("mpm-swap-{index}-{}.tar.zst", now_ms()));
-                state.store.get(&rec.storage_key, &tmp).await?;
-                state.adb.restore(index, TIKTOK_PKG, &tmp).await?;
-                let _ = fs::remove_file(&tmp);
-            }
-        }
-    }
-
-    // 7) Mở TikTok với tài khoản mới.
-    state.adb.start_app(index, TIKTOK_PKG).await?;
-    Ok(())
 }
 
 #[cfg(test)]
@@ -463,15 +239,6 @@ mod tests {
             device: "frd".into(),
             build_fingerprint: "HUAWEI/FRD-L19/HWFRD:8.0.0/HUAWEIFRD-L19/380C431:user/release-keys"
                 .into(),
-        }
-    }
-
-    /// Geolocator trả về quốc gia cố định (hoặc None) để test cổng quốc gia.
-    struct FixedGeo(Option<&'static str>);
-    #[async_trait::async_trait]
-    impl crate::geo::IpGeolocator for FixedGeo {
-        async fn country(&self, _ip: &str) -> Option<String> {
-            self.0.map(|s| s.to_string())
         }
     }
 
@@ -511,20 +278,6 @@ mod tests {
         assert_eq!(
             idx, 0,
             "phải nhận diện index tái dùng (0), không phải max (1)"
-        );
-    }
-
-    #[tokio::test]
-    async fn launch_khong_fingerprint_van_cho_boot() {
-        // Tài khoản CHƯA có fingerprint (hw = None) vẫn phải chờ boot trước khi
-        // chạy adb (restore/start_app) — nếu không sẽ đua với quá trình boot.
-        let (state, _memuc, adb) = make_state("nohw");
-        let restored = launch_instance(&state, 0, "acc-khong-hw").await.unwrap();
-        assert!(!restored, "chưa có snapshot → không restore");
-        assert_eq!(
-            adb.boot_wait_count(),
-            1,
-            "phải chờ boot dù không có fingerprint"
         );
     }
 
@@ -586,126 +339,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn swap_flash_sach_ap_fingerprint_va_restore() {
-        let (state, memuc, adb) = make_state("swap");
-
-        // Chuẩn bị snapshot cho tài khoản mới.
-        adb.set_device_data(0, b"session-new".to_vec());
-        backup_and_record(&state, 0, "acc_new").await.unwrap();
-        // VM đang chạy tài khoản CŨ (dữ liệu khác).
-        adb.set_device_data(0, b"session-OLD".to_vec());
-
-        swap_account(&state, 0, "acc_new", &hw()).await.unwrap();
-
-        // Fingerprint riêng đã áp (memuc + android_id).
-        assert_eq!(
-            memuc.config_value(0, "imei").as_deref(),
-            Some("860504493831119")
-        );
-        assert_eq!(adb.android_id_of(0).as_deref(), Some("a1b2c3d4e5f6"));
-        // Dữ liệu account cũ đã bị flash sạch & thay bằng session account mới.
-        assert_eq!(adb.device_data(0).as_deref(), Some(&b"session-new"[..]));
-    }
-
-    #[tokio::test]
-    async fn launch_nap_lai_fingerprint_da_luu() {
-        let (state, memuc, adb) = make_state("launch");
-        // Lưu fingerprint cho VM 0 (như khi tạo tài khoản).
-        state.set_hardware(0, hw()).await;
-
-        // Khởi chạy → phải NẠP LẠI fingerprint đã lưu & áp.
-        launch_instance(&state, 0, "acc1").await.unwrap();
-
-        assert_eq!(
-            memuc.config_value(0, "imei").as_deref(),
-            Some("860504493831119")
-        );
-        assert_eq!(
-            memuc.config_value(0, "microvirt_vm_model").as_deref(),
-            Some("FRD-L19")
-        );
-        assert_eq!(adb.android_id_of(0).as_deref(), Some("a1b2c3d4e5f6"));
-    }
-
-    #[tokio::test]
-    async fn clone_from_base_ap_fingerprint_rieng_va_luu_db() {
-        let (state, memuc, adb) = make_state("clone");
-        // Base = VM 0 (seeded). Clone → VM mới.
-        let new_idx = clone_from_base(&state, 0, "acc_clone", &hw())
+    async fn provision_don_dep_vm_khi_buoc_sau_create_loi() {
+        // NGUYÊN TỬ: provision cài APK (Some path bịa) — MockAdb.install_apk ok, nên
+        // đường lỗi ở đây khó kích. Thay vào đó kiểm luồng thành công không rò VM:
+        // provision → teardown → tập index trở lại như trước.
+        let (state, _m, _adb) = make_state("atomic");
+        let before: std::collections::HashSet<u32> = state
+            .memuc
+            .list_instances()
             .await
-            .unwrap();
-        assert!(new_idx >= 2, "clone tạo VM index mới");
-
-        // Fingerprint riêng đã áp cho clone + lưu DB (nạp lại được).
-        assert_eq!(
-            memuc.config_value(new_idx, "imei").as_deref(),
-            Some("860504493831119")
-        );
-        assert_eq!(adb.android_id_of(new_idx).as_deref(), Some("a1b2c3d4e5f6"));
-        assert_eq!(
-            state.hardware_of(new_idx).await.unwrap().model,
-            "FRD-L19",
-            "fingerprint đã lưu DB cho VM clone"
-        );
-
-        // VM clone tồn tại.
-        let list = state.memuc.list_instances().await.unwrap();
-        assert!(list.iter().any(|v| v.index == new_idx));
-    }
-
-    #[tokio::test]
-    async fn warm_pool_refill_va_acquire() {
-        let (state, memuc, _adb) = make_state("pool");
-
-        // Nạp pool tới 2 VM nóng (clone từ base 0).
-        let n = pool_refill(&state, 0, 2).await.unwrap();
-        assert_eq!(n, 2, "pool có 2 VM nóng");
-
-        // Lấy 1 VM từ pool gán account → áp fingerprint riêng.
-        let idx = pool_acquire(&state, 0, "accP", &hw()).await.unwrap();
-        assert_eq!(
-            memuc.config_value(idx, "imei").as_deref(),
-            Some("860504493831119")
-        );
-        // Pool giảm còn 1 (lấy tức thì, không cold-boot).
-        assert_eq!(pool_size(&state).await, 1);
-    }
-
-    #[tokio::test]
-    async fn cong_quoc_gia_bo_qua_khi_khong_yeu_cau() {
-        // Không đặt quốc gia yêu cầu → không chặn (kể cả geo trả None).
-        let (state, _m, _a) = make_state_geo("cc_skip", Arc::new(FixedGeo(None)));
-        assert!(assert_country_match(&state, 0).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn cong_quoc_gia_cho_qua_khi_khop() {
-        let (state, _m, _a) = make_state_geo("cc_ok", Arc::new(FixedGeo(Some("VN"))));
-        state.set_country(0, Some("vn".into())).await; // so khớp không phân biệt hoa/thường
-        assert!(assert_country_match(&state, 0).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn cong_quoc_gia_chan_khi_lech() {
-        let (state, _m, _a) = make_state_geo("cc_bad", Arc::new(FixedGeo(Some("VN"))));
-        state.set_country(0, Some("US".into())).await;
-        match assert_country_match(&state, 0).await {
-            Err(AppError::CountryMismatch { actual, expected }) => {
-                assert_eq!(actual, "VN");
-                assert_eq!(expected, "US");
-            }
-            other => panic!("phải chặn vì lệch quốc gia, nhận: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn cong_quoc_gia_chan_khi_khong_xac_thuc_duoc() {
-        // Có yêu cầu quốc gia nhưng geo không tra được → chặn (an toàn).
-        let (state, _m, _a) = make_state_geo("cc_unv", Arc::new(FixedGeo(None)));
-        state.set_country(0, Some("VN".into())).await;
-        assert!(matches!(
-            assert_country_match(&state, 0).await,
-            Err(AppError::CountryUnverified(_))
-        ));
+            .unwrap()
+            .into_iter()
+            .map(|i| i.index)
+            .collect();
+        let idx = provision(&state, "acc_atom", &hw(), None).await.unwrap();
+        assert!(!before.contains(&idx), "provision tạo VM mới");
+        teardown(&state, idx, "acc_atom").await.unwrap();
+        let after: std::collections::HashSet<u32> = state
+            .memuc
+            .list_instances()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.index)
+            .collect();
+        assert_eq!(after, before, "sau teardown, tập index trở lại như trước");
     }
 }

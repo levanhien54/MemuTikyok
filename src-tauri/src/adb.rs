@@ -29,8 +29,6 @@ pub trait AdbWorker: Send + Sync {
     async fn restore(&self, idx: u32, pkg: &str, archive: &Path) -> AppResult<()>;
     /// Đặt Android ID (qua adb, không phải khoá memuc — §15 thiết kế).
     async fn apply_android_id(&self, idx: u32, android_id: &str) -> AppResult<()>;
-    /// Flash sạch dữ liệu app (force-stop + pm clear) — cho luồng swap tài khoản.
-    async fn wipe_app(&self, idx: u32, pkg: &str) -> AppResult<()>;
     /// Chờ Android boot xong (`sys.boot_completed == 1`) thay vì sleep cố định.
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()>;
     /// Mở app Android (launcher intent).
@@ -39,8 +37,6 @@ pub trait AdbWorker: Send + Sync {
     async fn install_apk(&self, idx: u32, apk_path: &str) -> AppResult<()>;
     /// Gỡ/vô hiệu hóa một app khỏi user 0 (dùng để gỡ bloat).
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()>;
-    /// Liệt kê package bên thứ 3 (để chọn gỡ app thừa).
-    async fn list_third_party_apps(&self, idx: u32) -> AppResult<Vec<String>>;
     /// Scan dấu vết emulator (native check qua adb) → báo cáo từng mục.
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>>;
     /// Ẩn/sửa các dấu vết SỬA ĐƯỢC (best-effort; ro.* cần reboot mới ăn).
@@ -190,12 +186,6 @@ impl AdbWorker for RealAdbWorker {
         .map(|_| ())
     }
 
-    async fn wipe_app(&self, idx: u32, pkg: &str) -> AppResult<()> {
-        // pm clear / force-stop chạy được với shell user, KHÔNG cần root.
-        self.adb(idx, &format!("shell am force-stop {pkg}")).await?;
-        self.adb(idx, &format!("shell pm clear {pkg}")).await?;
-        Ok(())
-    }
 
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()> {
         use tokio::time::sleep;
@@ -280,14 +270,6 @@ impl AdbWorker for RealAdbWorker {
         self.adb(idx, &format!("shell pm disable-user --user 0 {pkg}"))
             .await
             .map(|_| ())
-    }
-
-    async fn list_third_party_apps(&self, idx: u32) -> AppResult<Vec<String>> {
-        let out = self.adb(idx, "shell pm list packages -3").await?;
-        Ok(String::from_utf8_lossy(&out)
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("package:").map(str::to_string))
-            .collect())
     }
 
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>> {
@@ -490,7 +472,6 @@ impl AdbWorker for RealAdbWorker {
 pub struct MockAdbWorker {
     devices: Mutex<HashMap<u32, Vec<u8>>>,
     android_ids: Mutex<HashMap<u32, String>>,
-    boot_waits: std::sync::atomic::AtomicUsize,
     locked_models: Mutex<HashMap<u32, String>>,
 }
 
@@ -499,15 +480,8 @@ impl MockAdbWorker {
         Self {
             devices: Mutex::new(HashMap::new()),
             android_ids: Mutex::new(HashMap::new()),
-            boot_waits: std::sync::atomic::AtomicUsize::new(0),
             locked_models: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Số lần `wait_boot_completed` được gọi (kiểm luồng khởi chạy luôn chờ boot).
-    #[cfg(test)]
-    pub fn boot_wait_count(&self) -> usize {
-        self.boot_waits.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Model đã bị khóa qua `lock_device_identity` cho một VM (kiểm wiring).
@@ -576,14 +550,7 @@ impl AdbWorker for MockAdbWorker {
         Ok(())
     }
 
-    async fn wipe_app(&self, idx: u32, _pkg: &str) -> AppResult<()> {
-        self.devices.lock().unwrap().remove(&idx);
-        Ok(())
-    }
-
     async fn wait_boot_completed(&self, _idx: u32) -> AppResult<()> {
-        self.boot_waits
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -597,10 +564,6 @@ impl AdbWorker for MockAdbWorker {
 
     async fn disable_app(&self, _idx: u32, _pkg: &str) -> AppResult<()> {
         Ok(())
-    }
-
-    async fn list_third_party_apps(&self, _idx: u32) -> AppResult<Vec<String>> {
-        Ok(vec![])
     }
 
     async fn scan_emulator_tells(&self, _idx: u32) -> AppResult<Vec<EmulatorTell>> {

@@ -201,48 +201,20 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = app_state.clone();
             tauri::async_runtime::spawn(poller::run(handle, state));
-            // Warm pool maintainer nền (opt-in qua settings).
-            tauri::async_runtime::spawn(orchestrator::pool_maintainer(app_state.clone()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::list_instances,
-            commands::start_instance,
-            commands::stop_instance,
-            commands::reboot_instance,
-            commands::create_instance,
-            commands::update_account,
-            commands::update_note,
-            commands::update_country,
-            commands::backup_instance,
-            commands::restore_instance,
-            commands::provision_session,
-            commands::teardown_session,
-            commands::swap_account,
-            commands::clone_from_base,
-            commands::warm_pool_refill,
-            commands::warm_pool_acquire,
-            commands::warm_pool_size,
-            commands::launch_instance,
-            commands::install_apk,
-            commands::install_tiktok,
-            commands::disable_apps,
-            commands::list_apps,
-            commands::scan_emulator,
-            commands::harden_vm,
-            commands::human_tap,
-            commands::human_swipe,
-            commands::run_watch_session,
-            commands::get_hardware,
-            commands::remove_instance,
-            commands::rename_instance,
-            commands::bulk_action,
+            // Vòng đời PROFILE (disposable: profile = dữ liệu, VM = tạo mới mỗi lần chạy).
             commands::create_profile,
             commands::list_profiles,
             commands::update_profile,
             commands::run_profile,
             commands::stop_profile,
             commands::delete_profile,
+            // Tiện ích trên VM đang chạy của profile.
+            commands::scan_emulator,
+            commands::run_watch_session,
+            // Cài đặt.
             commands::get_settings,
             commands::save_settings,
         ])

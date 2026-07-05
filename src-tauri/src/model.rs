@@ -132,26 +132,6 @@ pub struct ProfileView {
     pub running_vm: Option<u32>,
 }
 
-/// Payload tạo VM kèm hồ sơ tài khoản.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateInstancePayload {
-    pub account: AccountProfile,
-    #[serde(default)]
-    pub note: String,
-    /// Quốc gia yêu cầu (ISO alpha-2, vd "VN"). Rỗng/None = không ràng buộc khi chạy.
-    #[serde(default)]
-    pub country: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BulkOperation {
-    Start,
-    Stop,
-    Reboot,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
@@ -163,12 +143,6 @@ pub struct AppSettings {
     /// Đường dẫn APK TikTok (None = dùng mặc định DEFAULT_TIKTOK_APK).
     #[serde(default)]
     pub tiktok_apk_path: Option<String>,
-    /// Số VM giữ nóng trong warm pool (0 = tắt tự động refill).
-    #[serde(default)]
-    pub warm_pool_target: u8,
-    /// VM base để clone vào pool (None = chưa cấu hình).
-    #[serde(default)]
-    pub pool_base_index: Option<u32>,
 }
 
 impl Default for AppSettings {
@@ -180,8 +154,6 @@ impl Default for AppSettings {
             theme: "dark".to_string(),
             layout: "list".to_string(),
             tiktok_apk_path: None,
-            warm_pool_target: 0,
-            pool_base_index: None,
         }
     }
 }
@@ -228,15 +200,14 @@ mod tests {
 
     #[test]
     fn settings_tuong_thich_nguoc_ban_cu() {
-        // settings.json bản CŨ (thiếu tiktokApkPath/warmPoolTarget/poolBaseIndex)
-        // phải nạp được, không reset về mặc định — nhờ #[serde(default)].
+        // settings.json bản CŨ (thiếu tiktokApkPath, và cả warmPoolTarget/poolBaseIndex
+        // đã gỡ) phải nạp được, không reset về mặc định — nhờ #[serde(default)].
         let old = r#"{"memuPath":"D:/Microvirt/MEmu","pollIntervalMs":3000,
-            "maxConcurrency":3,"theme":"dark","layout":"list"}"#;
+            "maxConcurrency":3,"theme":"dark","layout":"list",
+            "warmPoolTarget":3,"poolBaseIndex":9}"#;
         let s: AppSettings = serde_json::from_str(old).expect("phải nạp được bản cũ");
         assert_eq!(s.memu_path.as_deref(), Some("D:/Microvirt/MEmu"));
-        assert_eq!(s.warm_pool_target, 0);
         assert!(s.tiktok_apk_path.is_none());
-        assert!(s.pool_base_index.is_none());
     }
 
     #[test]
@@ -244,14 +215,10 @@ mod tests {
         let s = AppSettings {
             memu_path: Some("D:/Microvirt/MEmu/memuc.exe".into()),
             tiktok_apk_path: Some("D:/a.apk".into()),
-            warm_pool_target: 3,
-            pool_base_index: Some(9),
             ..AppSettings::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: AppSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.warm_pool_target, 3);
-        assert_eq!(back.pool_base_index, Some(9));
         assert_eq!(back.tiktok_apk_path.as_deref(), Some("D:/a.apk"));
     }
 }
