@@ -63,6 +63,24 @@ export interface HardwareProfile {
   buildFingerprint?: string;
 }
 
+/** Profile = tài khoản (dữ liệu bền), tách khỏi VM (kiến trúc disposable). */
+export interface Profile {
+  username: string;
+  account: AccountProfile;
+  hardware: HardwareProfile;
+  country: string | null;
+  note: string;
+  createdAt: number;
+  lastRunAt: number | null;
+}
+
+/** Profile + trạng thái runtime (đang chạy trên VM nào). */
+export interface ProfileView {
+  profile: Profile;
+  /** vm_index đang chạy (null = idle). */
+  runningVm: number | null;
+}
+
 /** Payload tạo VM kèm hồ sơ tài khoản + ghi chú. */
 export interface CreateInstancePayload {
   account: AccountProfile;
@@ -112,13 +130,4 @@ export interface AppSettings {
   layout: 'grid' | 'list';
   /** Đường dẫn APK TikTok (null = dùng mặc định). */
   tiktokApkPath: string | null;
-  /** Số VM giữ nóng trong warm pool (0 = tắt tự động). */
-  warmPoolTarget: number;
-  /** VM base để clone vào pool (null = chưa cấu hình). */
-  poolBaseIndex: number | null;
-}
-
-/** Payload sự kiện đẩy từ backend (§8.4 SRS). */
-export interface InstancesUpdateEvent {
-  instances: Instance[];
 }

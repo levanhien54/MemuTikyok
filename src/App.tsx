@@ -2,23 +2,23 @@ import { useEffect, useState } from 'react';
 import { Sidebar, type View } from '@/components/Sidebar';
 import { Header } from '@/components/Header';
 import { DashboardView } from '@/features/dashboard/DashboardView';
-import { InstancesView } from '@/features/instances/InstancesView';
+import { ProfilesView } from '@/features/profiles/ProfilesView';
 import { SettingsView } from '@/features/settings/SettingsView';
 import { LogsView } from '@/features/logs/LogsView';
 import { Toaster } from '@/components/ui/Toaster';
-import { useInstanceStore } from '@/store/useInstanceStore';
+import { useProfileStore } from '@/store/useProfileStore';
 import { useSettingsStore } from '@/store/useSettingsStore';
 
 export default function App() {
   const [view, setView] = useState<View>('instances');
-  const initInstances = useInstanceStore((s) => s.init);
+  const initProfiles = useProfileStore((s) => s.init);
   const loadSettings = useSettingsStore((s) => s.load);
 
   useEffect(() => {
     void loadSettings();
-    const unsubscribe = initInstances();
+    const unsubscribe = initProfiles();
     return unsubscribe;
-  }, [initInstances, loadSettings]);
+  }, [initProfiles, loadSettings]);
 
   return (
     <div className="relative flex h-screen w-screen overflow-hidden">
@@ -27,7 +27,7 @@ export default function App() {
         <Header />
         <main className="flex flex-1 flex-col overflow-hidden animate-fade-in">
           {view === 'dashboard' && <DashboardView />}
-          {view === 'instances' && <InstancesView />}
+          {view === 'instances' && <ProfilesView />}
           {view === 'settings' && <SettingsView />}
           {view === 'logs' && <LogsView />}
         </main>

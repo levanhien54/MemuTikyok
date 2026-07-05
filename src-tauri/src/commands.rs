@@ -1,304 +1,71 @@
 //! Tauri commands — biên giới IPC được UI gọi qua `invoke` (§8.4 SRS).
-//! Lệnh thao tác đi qua Command Queue để kiểm soát tải (§8.3).
+//!
+//! Kiến trúc DISPOSABLE (profile = dữ liệu bền; VM tạo mới mỗi lần chạy rồi hủy):
+//! biên IPC chỉ phơi bày vòng đời PROFILE + tiện ích trên VM đang chạy + cài đặt.
+//! Lõi nghiệp vụ profile nằm ở `crate::profile_ops` (test được trực tiếp, kể cả E2E thật).
 
 use tauri::{AppHandle, Emitter, State};
 
-use crate::error::{AppError, AppResult};
-use crate::model::{
-    AccountProfile, AppSettings, BulkOperation, CreateInstancePayload, EmulatorTell,
-    HardwareProfile, Instance, SnapshotRecord, TIKTOK_PKG,
-};
-use crate::orchestrator;
-use crate::state::{now_ms, SharedState};
+use crate::error::AppResult;
+use crate::model::{AccountProfile, AppSettings, EmulatorTell, ProfileView, SnapshotRecord};
+use crate::state::SharedState;
 
-#[tauri::command]
-pub async fn list_instances(state: State<'_, SharedState>) -> AppResult<Vec<Instance>> {
-    let list = state.memuc.list_instances().await?;
-    Ok(state.merge_metadata(list).await)
-}
+// ── Vòng đời PROFILE — lệnh dưới đây chỉ là adapter mỏng của `crate::profile_ops` ──
 
+/// Tạo PROFILE mới — CHỈ ghi dữ liệu (account + fingerprint), KHÔNG tạo VM.
 #[tauri::command]
-pub async fn start_instance(index: u32, state: State<'_, SharedState>) -> AppResult<()> {
-    state.queue.run(state.memuc.start(index)).await?;
-    state.mark_launched(index).await;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn stop_instance(index: u32, state: State<'_, SharedState>) -> AppResult<()> {
-    state.queue.run(state.memuc.stop(index)).await
-}
-
-#[tauri::command]
-pub async fn reboot_instance(index: u32, state: State<'_, SharedState>) -> AppResult<()> {
-    state.queue.run(state.memuc.reboot(index)).await?;
-    state.mark_launched(index).await;
-    Ok(())
-}
-
-/// Tạo VM rồi gán hồ sơ tài khoản cho VM mới (index lớn nhất sau khi list lại).
-#[tauri::command]
-pub async fn create_instance(
-    payload: CreateInstancePayload,
-    state: State<'_, SharedState>,
-) -> AppResult<()> {
-    // Tạo VM + nhận diện index mới an toàn (tránh tái dùng index/đua tranh).
-    let new_index = orchestrator::create_vm(state.inner()).await?;
-    {
-        state.set_account(new_index, payload.account).await;
-        if !payload.note.trim().is_empty() {
-            state.set_note(new_index, payload.note).await;
-        }
-        // Quốc gia yêu cầu (đối chiếu khi khởi chạy). Rỗng → không ràng buộc.
-        if payload
-            .country
-            .as_deref()
-            .is_some_and(|c| !c.trim().is_empty())
-        {
-            state.set_country(new_index, payload.country).await;
-        }
-        // Sinh & lưu fingerprint gắn với tài khoản (áp lại mỗi lần khởi chạy).
-        if let Ok(hw) = crate::fingerprint::generate() {
-            state.set_hardware(new_index, hw.clone()).await;
-            // Áp cấu hình + độ phân giải NGAY → cửa sổ VM mặc định khớp thiết bị fake.
-            let _ = orchestrator::apply_hw_config(state.inner(), new_index, &hw).await;
-        }
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn update_account(
-    index: u32,
+pub async fn create_profile(
     account: AccountProfile,
+    note: Option<String>,
+    country: Option<String>,
     state: State<'_, SharedState>,
-) -> AppResult<()> {
-    state.set_account(index, account).await;
-    Ok(())
+) -> AppResult<String> {
+    crate::profile_ops::create(state.inner(), account, note, country).await
 }
 
+/// Danh sách profile + trạng thái runtime (đang chạy trên VM nào).
 #[tauri::command]
-pub async fn update_note(index: u32, note: String, state: State<'_, SharedState>) -> AppResult<()> {
-    state.set_note(index, note).await;
-    Ok(())
+pub async fn list_profiles(state: State<'_, SharedState>) -> AppResult<Vec<ProfileView>> {
+    Ok(crate::profile_ops::list(state.inner()).await)
 }
 
-/// Cập nhật quốc gia yêu cầu của VM (gate khi khởi chạy). None/rỗng = bỏ ràng buộc.
+/// Cập nhật account/ghi chú/quốc gia của profile (giữ nguyên username-key).
 #[tauri::command]
-pub async fn update_country(
-    index: u32,
+pub async fn update_profile(
+    username: String,
+    account: AccountProfile,
+    note: String,
     country: Option<String>,
     state: State<'_, SharedState>,
 ) -> AppResult<()> {
-    state.set_country(index, country).await;
-    Ok(())
+    crate::profile_ops::update(state.inner(), &username, account, note, country).await
 }
 
+/// CHẠY profile: cấp VM sạch, áp fingerprint + cài TikTok + restore session theo
+/// username, mở TikTok. Giữ vm_index ↔ username. Chặn khi vượt tối đa 5 VM.
 #[tauri::command]
-pub async fn remove_instance(index: u32, state: State<'_, SharedState>) -> AppResult<()> {
-    state.memuc.remove(index).await?;
-    state.forget(index).await;
-    Ok(())
+pub async fn run_profile(username: String, state: State<'_, SharedState>) -> AppResult<u32> {
+    crate::profile_ops::run(state.inner(), &username).await
 }
 
+/// DỪNG profile: backup session → HỦY VM (disposable). Trả snapshot nếu có.
 #[tauri::command]
-pub async fn rename_instance(
-    index: u32,
-    title: String,
+pub async fn stop_profile(
+    username: String,
     state: State<'_, SharedState>,
-) -> AppResult<()> {
-    state.memuc.rename(index, &title).await
+) -> AppResult<Option<SnapshotRecord>> {
+    crate::profile_ops::stop(state.inner(), &username).await
 }
 
-/// Thao tác hàng loạt: mỗi VM chạy qua queue (giới hạn song song). Một VM lỗi
-/// không dừng cả lô — thu thập rồi báo lỗi tổng hợp (§10.3 partial failure).
+/// XÓA profile: nếu đang chạy thì teardown trước, rồi xóa bản ghi.
 #[tauri::command]
-pub async fn bulk_action(
-    operation: BulkOperation,
-    indexes: Vec<u32>,
-    state: State<'_, SharedState>,
-) -> AppResult<()> {
-    let mut errors = Vec::new();
-    for index in indexes {
-        // Cổng quốc gia chỉ áp cho Start (khởi chạy) — nhất quán với nút Play.
-        if matches!(operation, BulkOperation::Start) {
-            if let Err(e) = orchestrator::assert_country_match(state.inner(), index).await {
-                errors.push(format!("VM {index}: {e}"));
-                continue;
-            }
-        }
-        let memuc = state.memuc.clone();
-        let result = state
-            .queue
-            .run(async move {
-                match operation {
-                    BulkOperation::Start => memuc.start(index).await,
-                    BulkOperation::Stop => memuc.stop(index).await,
-                    BulkOperation::Reboot => memuc.reboot(index).await,
-                }
-            })
-            .await;
-        match result {
-            Ok(()) => {
-                if matches!(operation, BulkOperation::Start | BulkOperation::Reboot) {
-                    state.mark_launched(index).await;
-                }
-            }
-            Err(e) => errors.push(format!("VM {index}: {e}")),
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(crate::error::AppError::CommandFailed(errors.join("; ")))
-    }
+pub async fn delete_profile(username: String, state: State<'_, SharedState>) -> AppResult<()> {
+    crate::profile_ops::delete(state.inner(), &username).await
 }
 
-/// Backup dữ liệu phiên TikTok của VM ra kho (Cloud/local) + ghi CSDL.
-/// `account_key` định danh tài khoản (ổn định qua các phiên, vd username).
-#[tauri::command]
-pub async fn backup_instance(
-    index: u32,
-    account_key: String,
-    state: State<'_, SharedState>,
-) -> AppResult<SnapshotRecord> {
-    orchestrator::backup_and_record(state.inner(), index, &account_key).await
-}
+// ── Tiện ích trên VM đang chạy của profile ──
 
-/// Nạp snapshot mới nhất của `account_key` vào VM (có verify sha256 trước khi restore).
-#[tauri::command]
-pub async fn restore_instance(
-    index: u32,
-    account_key: String,
-    state: State<'_, SharedState>,
-) -> AppResult<SnapshotRecord> {
-    let db = state
-        .db
-        .as_ref()
-        .ok_or_else(|| AppError::CommandFailed("Không có cơ sở dữ liệu snapshot".into()))?;
-    let rec = db
-        .latest_snapshot(&account_key)?
-        .ok_or_else(|| AppError::InvalidInput("Chưa có snapshot cho tài khoản này".into()))?;
-
-    // Toàn vẹn: từ chối restore nếu archive hỏng (§7 thiết kế).
-    if !state.store.verify(&rec.storage_key, &rec.sha256).await? {
-        return Err(AppError::CommandFailed(
-            "Snapshot hỏng: sha256 không khớp".into(),
-        ));
-    }
-
-    let tmp = std::env::temp_dir().join(format!("mpm-restore-{index}-{}.tar.zst", now_ms()));
-    state.store.get(&rec.storage_key, &tmp).await?;
-    state.adb.restore(index, TIKTOK_PKG, &tmp).await?;
-    let _ = std::fs::remove_file(&tmp);
-
-    Ok(rec)
-}
-
-/// Cấp phát một VM dùng-một-lần cho tài khoản: tạo sạch → áp hardware → start →
-/// restore snapshot mới nhất. Trả về index VM đã sẵn sàng.
-#[tauri::command]
-pub async fn provision_session(
-    account_key: String,
-    hardware: HardwareProfile,
-    state: State<'_, SharedState>,
-) -> AppResult<u32> {
-    orchestrator::provision(state.inner(), &account_key, &hardware).await
-}
-
-/// Clone từ base image + áp fingerprint riêng cho tài khoản → chạy. Trả index VM mới.
-#[tauri::command]
-pub async fn clone_from_base(
-    base_index: u32,
-    account_key: String,
-    hardware: HardwareProfile,
-    state: State<'_, SharedState>,
-) -> AppResult<u32> {
-    orchestrator::clone_from_base(state.inner(), base_index, &account_key, &hardware).await
-}
-
-/// Nạp warm pool tới `target` VM nóng (clone base + boot sẵn). Trả số VM trong pool.
-#[tauri::command]
-pub async fn warm_pool_refill(
-    base_index: u32,
-    target: usize,
-    state: State<'_, SharedState>,
-) -> AppResult<usize> {
-    orchestrator::pool_refill(state.inner(), base_index, target).await
-}
-
-/// Lấy 1 VM nóng từ pool gán cho tài khoản (áp fingerprint riêng). Trả index.
-#[tauri::command]
-pub async fn warm_pool_acquire(
-    base_index: u32,
-    account_key: String,
-    hardware: HardwareProfile,
-    state: State<'_, SharedState>,
-) -> AppResult<u32> {
-    orchestrator::pool_acquire(state.inner(), base_index, &account_key, &hardware).await
-}
-
-#[tauri::command]
-pub async fn warm_pool_size(state: State<'_, SharedState>) -> AppResult<usize> {
-    Ok(orchestrator::pool_size(state.inner()).await)
-}
-
-/// Khởi chạy VM: nạp lại fingerprint đã lưu (DB) & áp → start → restore session.
-#[tauri::command]
-pub async fn launch_instance(
-    index: u32,
-    account_key: String,
-    state: State<'_, SharedState>,
-) -> AppResult<bool> {
-    orchestrator::launch_instance(state.inner(), index, &account_key).await
-}
-
-/// Cài APK (vd TikTok) vào VM.
-#[tauri::command]
-pub async fn install_apk(
-    index: u32,
-    apk_path: String,
-    state: State<'_, SharedState>,
-) -> AppResult<()> {
-    state.adb.install_apk(index, &apk_path).await
-}
-
-/// Cài TikTok dùng đường dẫn trong Settings (fallback mặc định).
-#[tauri::command]
-pub async fn install_tiktok(index: u32, state: State<'_, SharedState>) -> AppResult<()> {
-    let path = {
-        state
-            .settings
-            .lock()
-            .await
-            .tiktok_apk_path
-            .clone()
-            .filter(|p| !p.trim().is_empty())
-    }
-    .unwrap_or_else(|| crate::model::DEFAULT_TIKTOK_APK.to_string());
-    state.adb.install_apk(index, &path).await
-}
-
-/// Gỡ/vô hiệu hóa danh sách app (bloat, app không dùng) khỏi VM.
-#[tauri::command]
-pub async fn disable_apps(
-    index: u32,
-    packages: Vec<String>,
-    state: State<'_, SharedState>,
-) -> AppResult<()> {
-    for pkg in packages {
-        state.adb.disable_app(index, &pkg).await?;
-    }
-    Ok(())
-}
-
-/// Liệt kê app bên thứ 3 trong VM (để chọn gỡ).
-#[tauri::command]
-pub async fn list_apps(index: u32, state: State<'_, SharedState>) -> AppResult<Vec<String>> {
-    state.adb.list_third_party_apps(index).await
-}
-
-/// Scan dấu vết emulator của một VM (chẩn đoán chống phát hiện).
+/// Scan dấu vết emulator của VM đang chạy (chẩn đoán chống phát hiện MÁY ẢO).
 #[tauri::command]
 pub async fn scan_emulator(
     index: u32,
@@ -307,33 +74,8 @@ pub async fn scan_emulator(
     state.adb.scan_emulator_tells(index).await
 }
 
-/// Ẩn/sửa các dấu vết sửa được (best-effort).
-#[tauri::command]
-pub async fn harden_vm(index: u32, state: State<'_, SharedState>) -> AppResult<()> {
-    state.adb.harden(index).await
-}
-
-/// Tap GIẢ NGƯỜI (rung tọa độ + giữ ngẫu nhiên) — chống dò tự động hóa.
-#[tauri::command]
-pub async fn human_tap(index: u32, x: i32, y: i32, state: State<'_, SharedState>) -> AppResult<()> {
-    state.adb.human_tap(index, x, y).await
-}
-
-/// Swipe GIẢ NGƯỜI (đường cong + timing ngẫu nhiên) — chống dò tự động hóa.
-#[tauri::command]
-pub async fn human_swipe(
-    index: u32,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-    state: State<'_, SharedState>,
-) -> AppResult<()> {
-    state.adb.human_swipe(index, x0, y0, x1, y1).await
-}
-
-/// Chạy phiên "xem feed" TikTok GIẢ NGƯỜI ở NỀN (warm-up). Trả ngay; khi xong phát
-/// sự kiện `automation:done` (SessionReport) hoặc `automation:error`.
+/// Chạy phiên "xem feed" TikTok ở NỀN (warm-up). Trả ngay; khi xong phát sự kiện
+/// `automation:done` (SessionReport) hoặc `automation:error`.
 #[tauri::command]
 pub async fn run_watch_session(
     index: u32,
@@ -359,35 +101,7 @@ pub async fn run_watch_session(
     Ok(())
 }
 
-/// Lấy fingerprint (đã lưu DB) của một VM để hiển thị.
-#[tauri::command]
-pub async fn get_hardware(
-    index: u32,
-    state: State<'_, SharedState>,
-) -> AppResult<Option<HardwareProfile>> {
-    Ok(state.hardware_of(index).await)
-}
-
-/// Đổi tài khoản trên VM đang chạy (nhanh: flash sạch + fingerprint + reboot + restore).
-#[tauri::command]
-pub async fn swap_account(
-    index: u32,
-    account_key: String,
-    hardware: HardwareProfile,
-    state: State<'_, SharedState>,
-) -> AppResult<()> {
-    orchestrator::swap_account(state.inner(), index, &account_key, &hardware).await
-}
-
-/// Kết thúc phiên: backup dữ liệu về kho/CSDL rồi HỦY VM (disposable).
-#[tauri::command]
-pub async fn teardown_session(
-    index: u32,
-    account_key: String,
-    state: State<'_, SharedState>,
-) -> AppResult<SnapshotRecord> {
-    orchestrator::teardown(state.inner(), index, &account_key).await
-}
+// ── Cài đặt ──
 
 #[tauri::command]
 pub async fn get_settings(state: State<'_, SharedState>) -> AppResult<AppSettings> {

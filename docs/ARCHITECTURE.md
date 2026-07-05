@@ -2,6 +2,12 @@
 
 Tài liệu này tóm tắt các quyết định kiến trúc quan trọng để **dễ quản lý, sửa lỗi và nâng cấp**. Chi tiết đầy đủ: §8 trong [`../kehoac.md`](../kehoac.md).
 
+> **⚠️ 2026-07-05:** Mô hình hiện hành là **PROFILE dùng-một-lần** — profile = dữ liệu bền;
+> VM tạo mới mỗi lần Chạy rồi hủy khi Dừng (tối đa 5). Đã gỡ **warm pool + API
+> instance-centric + proxy + poller**. Biên IPC còn: 6 lệnh profile + `scan_emulator` +
+> `run_watch_session` + `get/save_settings`. Phần mô tả instance/poller/bulk bên dưới là
+> lịch sử. Xem [`E2E_RUNBOOK.md §8`](E2E_RUNBOOK.md) + [`BACKUP_RESTORE_DESIGN.md`](BACKUP_RESTORE_DESIGN.md).
+
 ## Nguyên tắc cốt lõi
 1. **Một biên giới tương tác OS duy nhất.** Mọi lệnh `memuc`/`adb` đi qua trait `MemucClient`. Không nơi nào khác trong code được spawn process MEmu. → dễ test, dễ thích ứng khi MEmu đổi format (R-07).
 2. **Nguồn sự thật của trạng thái là polling**, không phải kết quả lệnh (§7.2). Lệnh `memuc` bất đồng bộ; UI hiển thị Pending tới khi poller xác nhận.

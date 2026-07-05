@@ -93,25 +93,6 @@ impl RealMemuc {
     }
 }
 
-/// Whitelist tên VM: chữ, số, khoảng trắng, `-`, `_`, `.` (SEC-1 / FR-B-5).
-fn validate_title(title: &str) -> AppResult<()> {
-    let t = title.trim();
-    if t.is_empty() {
-        return Err(AppError::InvalidInput("Tên máy ảo không được rỗng".into()));
-    }
-    if t.len() > 64 {
-        return Err(AppError::InvalidInput(
-            "Tên máy ảo quá dài (tối đa 64 ký tự)".into(),
-        ));
-    }
-    if !t
-        .chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
-    {
-        return Err(AppError::InvalidInput("Tên chứa ký tự không hợp lệ".into()));
-    }
-    Ok(())
-}
 
 #[async_trait]
 impl MemucClient for RealMemuc {
@@ -132,33 +113,14 @@ impl MemucClient for RealMemuc {
             .map(|_| ())
     }
 
-    async fn reboot(&self, index: u32) -> AppResult<()> {
-        self.run_to(&["reboot", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
-            .await
-            .map(|_| ())
-    }
-
     async fn create(&self) -> AppResult<()> {
         self.run_to(&["create"], LIFECYCLE_TIMEOUT)
             .await
             .map(|_| ())
     }
 
-    async fn clone_vm(&self, index: u32) -> AppResult<()> {
-        self.run_to(&["clone", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
-            .await
-            .map(|_| ())
-    }
-
     async fn remove(&self, index: u32) -> AppResult<()> {
         self.run_to(&["remove", "-i", &index.to_string()], LIFECYCLE_TIMEOUT)
-            .await
-            .map(|_| ())
-    }
-
-    async fn rename(&self, index: u32, title: &str) -> AppResult<()> {
-        validate_title(title)?;
-        self.run(&["rename", "-i", &index.to_string(), title])
             .await
             .map(|_| ())
     }
@@ -198,29 +160,3 @@ impl MemucClient for RealMemuc {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tu_choi_ten_rong() {
-        assert!(validate_title("").is_err());
-        assert!(validate_title("   ").is_err());
-    }
-
-    #[test]
-    fn tu_choi_ky_tu_nguy_hiem() {
-        // Ngăn injection: ký tự shell/đường dẫn bị chặn.
-        assert!(validate_title("vm & del").is_err());
-        assert!(validate_title("a\"b").is_err());
-        assert!(validate_title("a|b").is_err());
-        assert!(validate_title("../evil").is_err());
-    }
-
-    #[test]
-    fn chap_nhan_ten_hop_le() {
-        assert!(validate_title("MEmu-01").is_ok());
-        assert!(validate_title("Tester A.2").is_ok());
-        assert!(validate_title("farm_09").is_ok());
-    }
-}

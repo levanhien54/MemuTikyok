@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 use crate::error::{AppError, AppResult};
 use crate::humanize::{self, Rng};
@@ -29,8 +29,6 @@ pub trait AdbWorker: Send + Sync {
     async fn restore(&self, idx: u32, pkg: &str, archive: &Path) -> AppResult<()>;
     /// Đặt Android ID (qua adb, không phải khoá memuc — §15 thiết kế).
     async fn apply_android_id(&self, idx: u32, android_id: &str) -> AppResult<()>;
-    /// Flash sạch dữ liệu app (force-stop + pm clear) — cho luồng swap tài khoản.
-    async fn wipe_app(&self, idx: u32, pkg: &str) -> AppResult<()>;
     /// Chờ Android boot xong (`sys.boot_completed == 1`) thay vì sleep cố định.
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()>;
     /// Mở app Android (launcher intent).
@@ -39,8 +37,6 @@ pub trait AdbWorker: Send + Sync {
     async fn install_apk(&self, idx: u32, apk_path: &str) -> AppResult<()>;
     /// Gỡ/vô hiệu hóa một app khỏi user 0 (dùng để gỡ bloat).
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()>;
-    /// Liệt kê package bên thứ 3 (để chọn gỡ app thừa).
-    async fn list_third_party_apps(&self, idx: u32) -> AppResult<Vec<String>>;
     /// Scan dấu vết emulator (native check qua adb) → báo cáo từng mục.
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>>;
     /// Ẩn/sửa các dấu vết SỬA ĐƯỢC (best-effort; ro.* cần reboot mới ăn).
@@ -50,9 +46,15 @@ pub trait AdbWorker: Send + Sync {
     /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop (cần Magisk trong base
     /// image — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool>;
-    /// Tap **GIẢ NGƯỜI**: rung tọa độ + thời gian giữ ngẫu nhiên (chống dò tự động hóa).
+    /// Tap có rung tọa độ + thời gian giữ ngẫu nhiên. ⚠️ HẠN CHẾ THẬT: hiện dùng
+    /// `input swipe pt pt hold` — sự kiện BƠM (injected, không có luồng touch
+    /// DOWN/MOVE/UP thật, không áp lực/kích thước) → VẪN có thể bị phát hiện. Không
+    /// coi đây là "chống dò tự động hóa" hoàn chỉnh (cần sendevent /dev/input — TODO).
     async fn human_tap(&self, idx: u32, x: i32, y: i32) -> AppResult<()>;
-    /// Swipe **GIẢ NGƯỜI**: tọa độ rung + thời lượng ngẫu nhiên (chống touch-jitter check).
+    /// Swipe có rung + thời lượng ngẫu nhiên. ⚠️ HẠN CHẾ THẬT: đường cong Bézier +
+    /// gia tốc do humanize.rs tính bị BỎ, chỉ 2 điểm đầu/cuối đưa vào `input swipe`
+    /// → Android nội suy ĐƯỜNG THẲNG vận tốc tuyến tính (một dấu hiệu bot rõ). Chưa
+    /// đạt "chống touch-jitter check"; cần sendevent phát lại toàn đường (TODO).
     async fn human_swipe(&self, idx: u32, x0: i32, y0: i32, x1: i32, y1: i32) -> AppResult<()>;
 }
 
@@ -184,12 +186,6 @@ impl AdbWorker for RealAdbWorker {
         .map(|_| ())
     }
 
-    async fn wipe_app(&self, idx: u32, pkg: &str) -> AppResult<()> {
-        // pm clear / force-stop chạy được với shell user, KHÔNG cần root.
-        self.adb(idx, &format!("shell am force-stop {pkg}")).await?;
-        self.adb(idx, &format!("shell pm clear {pkg}")).await?;
-        Ok(())
-    }
 
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()> {
         use tokio::time::sleep;
@@ -221,9 +217,52 @@ impl AdbWorker for RealAdbWorker {
 
     async fn install_apk(&self, idx: u32, apk_path: &str) -> AppResult<()> {
         // -r: cài đè nếu đã có; -g: cấp sẵn quyền runtime.
-        self.adb(idx, &format!("install -r -g \"{apk_path}\""))
-            .await
-            .map(|_| ())
+        // ⚠️ --no-streaming BẮT BUỘC: MEmu KHÔNG hỗ trợ streamed install — adb mặc định
+        //    dùng streamed → "adb: failed to install ...: Performing Streamed Install"
+        //    (thất bại tức thì, không push byte nào; kiểm chứng qua test thực). Ép chế độ
+        //    push-rồi-install (--no-streaming) mới cài được (230MB push ~12s → "Success").
+        // ⚠️ `adb install` báo kết quả ở OUTPUT chứ không chỉ ở exit code: nhiều bản vẫn
+        //    exit 0 dù thất bại → PHẢI đọc output tìm "Success", không tin mỗi status.
+        //    Bắt cả stderr để báo lỗi rõ ràng (không đi qua adb() vì nó bỏ stderr khi exit 0).
+        // ⚠️ THỬ LẠI: ngay sau khi provision boot + áp android_id/debloat/harden, kết nối
+        //    adb hay bị "failed to read copy response" (rớt lúc commit dù push xong 230MB).
+        //    Đây là lỗi CHỚP NHOÁNG — thử lại vài lần (chờ VM lắng) là ăn (kiểm chứng thực).
+        // Chống inject vào chuỗi shell: apk_path được bọc trong nháy kép, nên một ký tự
+        // nháy/metachar có thể thoát nháy và chèn token adb/shell khác. Từ chối sớm.
+        if apk_path.contains(['"', '\'', '`', '$', ';', '&', '|', '\n', '\r']) {
+            return Err(AppError::InvalidInput(format!(
+                "Đường dẫn APK chứa ký tự không hợp lệ: {apk_path}"
+            )));
+        }
+        let arg = format!("install -r -g --no-streaming \"{apk_path}\"");
+        const MAX_TRIES: u32 = 3;
+        let mut last = String::new();
+        for attempt in 1..=MAX_TRIES {
+            let mut cmd = Command::new(&self.memuc_path);
+            cmd.args(["-i", &idx.to_string(), "adb", &arg]);
+            cmd.kill_on_drop(true);
+            #[cfg(windows)]
+            {
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let output = timeout(ADB_TIMEOUT, cmd.output())
+                .await
+                .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))??;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stdout.contains("Success") || stderr.contains("Success") {
+                return Ok(());
+            }
+            last = format!("out={}, err={}", stdout.trim(), stderr.trim());
+            tracing::warn!(idx, attempt, max = MAX_TRIES, "adb install lỗi, thử lại: {last}");
+            if attempt < MAX_TRIES {
+                sleep(Duration::from_secs(4)).await;
+            }
+        }
+        Err(AppError::CommandFailed(format!(
+            "adb install thất bại sau {MAX_TRIES} lần: {last}"
+        )))
     }
 
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()> {
@@ -231,14 +270,6 @@ impl AdbWorker for RealAdbWorker {
         self.adb(idx, &format!("shell pm disable-user --user 0 {pkg}"))
             .await
             .map(|_| ())
-    }
-
-    async fn list_third_party_apps(&self, idx: u32) -> AppResult<Vec<String>> {
-        let out = self.adb(idx, "shell pm list packages -3").await?;
-        Ok(String::from_utf8_lossy(&out)
-            .lines()
-            .filter_map(|l| l.trim().strip_prefix("package:").map(str::to_string))
-            .collect())
     }
 
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>> {
@@ -441,7 +472,6 @@ impl AdbWorker for RealAdbWorker {
 pub struct MockAdbWorker {
     devices: Mutex<HashMap<u32, Vec<u8>>>,
     android_ids: Mutex<HashMap<u32, String>>,
-    boot_waits: std::sync::atomic::AtomicUsize,
     locked_models: Mutex<HashMap<u32, String>>,
 }
 
@@ -450,15 +480,8 @@ impl MockAdbWorker {
         Self {
             devices: Mutex::new(HashMap::new()),
             android_ids: Mutex::new(HashMap::new()),
-            boot_waits: std::sync::atomic::AtomicUsize::new(0),
             locked_models: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Số lần `wait_boot_completed` được gọi (kiểm luồng khởi chạy luôn chờ boot).
-    #[cfg(test)]
-    pub fn boot_wait_count(&self) -> usize {
-        self.boot_waits.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Model đã bị khóa qua `lock_device_identity` cho một VM (kiểm wiring).
@@ -527,14 +550,7 @@ impl AdbWorker for MockAdbWorker {
         Ok(())
     }
 
-    async fn wipe_app(&self, idx: u32, _pkg: &str) -> AppResult<()> {
-        self.devices.lock().unwrap().remove(&idx);
-        Ok(())
-    }
-
     async fn wait_boot_completed(&self, _idx: u32) -> AppResult<()> {
-        self.boot_waits
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -548,10 +564,6 @@ impl AdbWorker for MockAdbWorker {
 
     async fn disable_app(&self, _idx: u32, _pkg: &str) -> AppResult<()> {
         Ok(())
-    }
-
-    async fn list_third_party_apps(&self, _idx: u32) -> AppResult<Vec<String>> {
-        Ok(vec![])
     }
 
     async fn scan_emulator_tells(&self, _idx: u32) -> AppResult<Vec<EmulatorTell>> {

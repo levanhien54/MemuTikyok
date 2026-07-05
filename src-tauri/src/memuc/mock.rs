@@ -99,10 +99,6 @@ impl MemucClient for MockMemuc {
         self.set_status(index, InstanceStatus::Stopped)
     }
 
-    async fn reboot(&self, index: u32) -> AppResult<()> {
-        self.set_status(index, InstanceStatus::Running)
-    }
-
     async fn create(&self) -> AppResult<()> {
         let mut vms = self.state.lock().unwrap();
         let next = lowest_free_index(&vms);
@@ -122,42 +118,8 @@ impl MemucClient for MockMemuc {
         Ok(())
     }
 
-    async fn clone_vm(&self, index: u32) -> AppResult<()> {
-        let mut vms = self.state.lock().unwrap();
-        let src_title = vms
-            .iter()
-            .find(|v| v.index == index)
-            .map(|v| v.title.clone())
-            .unwrap_or_else(|| "MEmu".to_string());
-        let next = lowest_free_index(&vms);
-        vms.push(Instance {
-            index: next,
-            title: format!("{src_title}_clone"),
-            status: InstanceStatus::Stopped,
-            pid: None,
-            window_handle: None,
-            ip: None,
-            disk_usage_bytes: Some(2048),
-            last_launched_at: None,
-            country: None,
-            note: String::new(),
-            account: None,
-        });
-        Ok(())
-    }
-
     async fn remove(&self, index: u32) -> AppResult<()> {
         self.state.lock().unwrap().retain(|v| v.index != index);
-        Ok(())
-    }
-
-    async fn rename(&self, index: u32, title: &str) -> AppResult<()> {
-        let mut vms = self.state.lock().unwrap();
-        let vm = vms
-            .iter_mut()
-            .find(|v| v.index == index)
-            .ok_or_else(|| AppError::InvalidInput(format!("Không có VM index {index}")))?;
-        vm.title = title.to_string();
         Ok(())
     }
 

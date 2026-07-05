@@ -21,12 +21,8 @@ pub trait MemucClient: Send + Sync {
 
     async fn start(&self, index: u32) -> AppResult<()>;
     async fn stop(&self, index: u32) -> AppResult<()>;
-    async fn reboot(&self, index: u32) -> AppResult<()>;
     async fn create(&self) -> AppResult<()>;
-    /// Nhân bản một VM (dùng base image đã chuẩn bị: debloat + TikTok + config).
-    async fn clone_vm(&self, index: u32) -> AppResult<()>;
     async fn remove(&self, index: u32) -> AppResult<()>;
-    async fn rename(&self, index: u32, title: &str) -> AppResult<()>;
 
     /// Áp một cấu hình qua `memuc setconfigex` (vd imei, model).
     async fn set_config(&self, index: u32, key: &str, value: &str) -> AppResult<()>;

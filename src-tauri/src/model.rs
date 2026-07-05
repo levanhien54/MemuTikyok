@@ -104,24 +104,32 @@ pub struct Instance {
     pub account: Option<AccountProfile>,
 }
 
-/// Payload tạo VM kèm hồ sơ tài khoản.
-#[derive(Debug, Clone, Deserialize)]
+/// Hồ sơ tài khoản ĐỘC LẬP với VM (kiến trúc "dùng-một-lần"): profile là **dữ liệu
+/// bền** (account + fingerprint + ghi chú + quốc gia), VM chỉ là **pool tạm** để chạy.
+/// Khóa theo `username` (= tiktok_username, ổn định, cũng là account_key của snapshot).
+/// Tạo profile KHÔNG tạo VM → 10 profile chỉ tốn vài KB + snapshot (~3.5MB/account).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateInstancePayload {
+pub struct Profile {
+    pub username: String,
     pub account: AccountProfile,
-    #[serde(default)]
-    pub note: String,
-    /// Quốc gia yêu cầu (ISO alpha-2, vd "VN"). Rỗng/None = không ràng buộc khi chạy.
+    pub hardware: HardwareProfile,
     #[serde(default)]
     pub country: Option<String>,
+    #[serde(default)]
+    pub note: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BulkOperation {
-    Start,
-    Stop,
-    Reboot,
+/// Profile + trạng thái runtime (đang chạy trên VM nào) — trả về UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileView {
+    pub profile: Profile,
+    /// vm_index đang chạy profile (None = idle, chưa chạy).
+    pub running_vm: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,12 +143,6 @@ pub struct AppSettings {
     /// Đường dẫn APK TikTok (None = dùng mặc định DEFAULT_TIKTOK_APK).
     #[serde(default)]
     pub tiktok_apk_path: Option<String>,
-    /// Số VM giữ nóng trong warm pool (0 = tắt tự động refill).
-    #[serde(default)]
-    pub warm_pool_target: u8,
-    /// VM base để clone vào pool (None = chưa cấu hình).
-    #[serde(default)]
-    pub pool_base_index: Option<u32>,
 }
 
 impl Default for AppSettings {
@@ -152,8 +154,6 @@ impl Default for AppSettings {
             theme: "dark".to_string(),
             layout: "list".to_string(),
             tiktok_apk_path: None,
-            warm_pool_target: 0,
-            pool_base_index: None,
         }
     }
 }
@@ -187,28 +187,20 @@ pub struct SnapshotRecord {
     pub created_at: i64,
 }
 
-/// Payload cho sự kiện đẩy `instances:update` (§8.4 SRS).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstancesUpdateEvent {
-    pub instances: Vec<Instance>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn settings_tuong_thich_nguoc_ban_cu() {
-        // settings.json bản CŨ (thiếu tiktokApkPath/warmPoolTarget/poolBaseIndex)
-        // phải nạp được, không reset về mặc định — nhờ #[serde(default)].
+        // settings.json bản CŨ (thiếu tiktokApkPath, và cả warmPoolTarget/poolBaseIndex
+        // đã gỡ) phải nạp được, không reset về mặc định — nhờ #[serde(default)].
         let old = r#"{"memuPath":"D:/Microvirt/MEmu","pollIntervalMs":3000,
-            "maxConcurrency":3,"theme":"dark","layout":"list"}"#;
+            "maxConcurrency":3,"theme":"dark","layout":"list",
+            "warmPoolTarget":3,"poolBaseIndex":9}"#;
         let s: AppSettings = serde_json::from_str(old).expect("phải nạp được bản cũ");
         assert_eq!(s.memu_path.as_deref(), Some("D:/Microvirt/MEmu"));
-        assert_eq!(s.warm_pool_target, 0);
         assert!(s.tiktok_apk_path.is_none());
-        assert!(s.pool_base_index.is_none());
     }
 
     #[test]
@@ -216,14 +208,10 @@ mod tests {
         let s = AppSettings {
             memu_path: Some("D:/Microvirt/MEmu/memuc.exe".into()),
             tiktok_apk_path: Some("D:/a.apk".into()),
-            warm_pool_target: 3,
-            pool_base_index: Some(9),
             ..AppSettings::default()
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: AppSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.warm_pool_target, 3);
-        assert_eq!(back.pool_base_index, Some(9));
         assert_eq!(back.tiktok_apk_path.as_deref(), Some("D:/a.apk"));
     }
 }

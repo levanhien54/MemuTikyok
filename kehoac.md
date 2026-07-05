@@ -6,6 +6,16 @@
 **Ngày cập nhật:** 2026-07-02
 **Chuẩn tham chiếu:** ISO/IEC/IEEE 29148 (Requirements Engineering), C4 Model (Architecture), MoSCoW (Prioritization).
 
+> **⚠️ CẬP NHẬT KIẾN TRÚC (2026-07-05) — ĐỌC TRƯỚC:** Tài liệu v3.0 mô tả mô hình
+> *instance-centric* (1 tài khoản ↔ 1 VM bền, thao tác hàng loạt, warm pool, proxy).
+> Bản cài **hiện tại** đã chuyển sang **mô hình PROFILE dùng-một-lần**: profile = dữ
+> liệu bền (khóa theo username, credential mã hóa); VM được **tạo mới mỗi lần Chạy** rồi
+> **HỦY khi Dừng** (backup phiên trước; tối đa 5 VM song song). Đã **GỠ HẲN**: warm pool,
+> proxy, và toàn bộ API/lệnh instance-centric (start/stop/reboot/create/clone/rename/bulk
+> /swap/launch). Nguồn chân lý mô hình hiện hành: **`docs/BACKUP_RESTORE_DESIGN.md`** +
+> **`docs/E2E_RUNBOOK.md §8`**. Các mục § nói về proxy/pool/bulk/instance-lifecycle bên
+> dưới là **LỊCH SỬ**, không còn hiệu lực.
+
 > **Quyết định đã chốt (xem §18):** (1) Dùng MEmu bản **mới nhất**; (2) Vận hành **tối đa 5 máy ảo** cùng lúc — kiến trúc vẫn giữ chuẩn mở rộng nhưng yêu cầu hiệu năng được hiệu chỉnh về quy mô nhỏ; (3) Khởi tạo ngay với **Tauri + React + TailwindCSS**.
 
 ---
