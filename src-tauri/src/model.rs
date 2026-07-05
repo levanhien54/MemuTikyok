@@ -104,6 +104,34 @@ pub struct Instance {
     pub account: Option<AccountProfile>,
 }
 
+/// Hồ sơ tài khoản ĐỘC LẬP với VM (kiến trúc "dùng-một-lần"): profile là **dữ liệu
+/// bền** (account + fingerprint + ghi chú + quốc gia), VM chỉ là **pool tạm** để chạy.
+/// Khóa theo `username` (= tiktok_username, ổn định, cũng là account_key của snapshot).
+/// Tạo profile KHÔNG tạo VM → 10 profile chỉ tốn vài KB + snapshot (~3.5MB/account).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Profile {
+    pub username: String,
+    pub account: AccountProfile,
+    pub hardware: HardwareProfile,
+    #[serde(default)]
+    pub country: Option<String>,
+    #[serde(default)]
+    pub note: String,
+    pub created_at: i64,
+    #[serde(default)]
+    pub last_run_at: Option<i64>,
+}
+
+/// Profile + trạng thái runtime (đang chạy trên VM nào) — trả về UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileView {
+    pub profile: Profile,
+    /// vm_index đang chạy profile (None = idle, chưa chạy).
+    pub running_vm: Option<u32>,
+}
+
 /// Payload tạo VM kèm hồ sơ tài khoản.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection};
 
 use crate::crypto::{self, Key32};
-use crate::model::{AccountProfile, HardwareProfile, SnapshotMeta, SnapshotRecord};
+use crate::model::{AccountProfile, HardwareProfile, Profile, SnapshotMeta, SnapshotRecord};
 use crate::state::InstanceMeta;
 
 pub struct Db {
@@ -43,7 +43,16 @@ impl Db {
                 created_at   INTEGER NOT NULL,
                 is_latest    INTEGER NOT NULL DEFAULT 1
             );
-            CREATE INDEX IF NOT EXISTS idx_snap_account ON snapshots(account_key);",
+            CREATE INDEX IF NOT EXISTS idx_snap_account ON snapshots(account_key);
+            CREATE TABLE IF NOT EXISTS profiles (
+                username      TEXT PRIMARY KEY,
+                account_json  TEXT NOT NULL,
+                hardware_json TEXT NOT NULL,
+                country       TEXT,
+                note          TEXT NOT NULL DEFAULT '',
+                created_at    INTEGER NOT NULL,
+                last_run_at   INTEGER
+            );",
         )?;
         // Migration: thêm cột hardware_json cho DB tạo trước bản này (bỏ qua nếu đã có).
         let _ = conn.execute(
@@ -147,6 +156,101 @@ impl Db {
             "DELETE FROM instance_meta WHERE vm_index=?1",
             params![index],
         )?;
+        Ok(())
+    }
+
+    // ── Profiles (kiến trúc disposable: profile là dữ liệu bền, tách khỏi vm_index) ──
+
+    /// Ghi/cập nhật một profile (account mã hóa như instance_meta).
+    pub fn upsert_profile(&self, p: &Profile) -> rusqlite::Result<()> {
+        let account_json = serde_json::to_string(&p.account)
+            .ok()
+            .map(|json| match self.enc_key.as_ref() {
+                Some(k) => crypto::encrypt_to_hex(k, &json)
+                    .map(|hex| format!("enc:{hex}"))
+                    .unwrap_or(json),
+                None => json,
+            })
+            .unwrap_or_default();
+        let hardware_json = serde_json::to_string(&p.hardware).unwrap_or_default();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO profiles (username, account_json, hardware_json, country, note, created_at, last_run_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(username) DO UPDATE SET
+                account_json=excluded.account_json,
+                hardware_json=excluded.hardware_json,
+                country=excluded.country,
+                note=excluded.note,
+                last_run_at=excluded.last_run_at",
+            params![
+                p.username,
+                account_json,
+                hardware_json,
+                p.country,
+                p.note,
+                p.created_at,
+                p.last_run_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Nạp toàn bộ profile (giải mã account). Bỏ qua bản ghi hỏng.
+    pub fn load_profiles(&self) -> rusqlite::Result<Vec<Profile>> {
+        let key = self.enc_key;
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT username, account_json, hardware_json, country, note, created_at, last_run_at FROM profiles",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let username: String = row.get(0)?;
+            let account_json: String = row.get(1)?;
+            let hardware_json: String = row.get(2)?;
+            let country: Option<String> = row.get(3)?;
+            let note: String = row.get(4)?;
+            let created_at: i64 = row.get(5)?;
+            let last_run_at: Option<i64> = row.get(6)?;
+            let account_str = match account_json.strip_prefix("enc:") {
+                Some(hex) => key
+                    .as_ref()
+                    .and_then(|k| crypto::decrypt_from_hex(k, hex).ok())
+                    .unwrap_or_default(),
+                None => account_json,
+            };
+            let account = serde_json::from_str::<AccountProfile>(&account_str).ok();
+            let hardware = serde_json::from_str::<HardwareProfile>(&hardware_json).ok();
+            Ok((
+                username,
+                account,
+                hardware,
+                country,
+                note,
+                created_at,
+                last_run_at,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (username, account, hardware, country, note, created_at, last_run_at) = r?;
+            if let (Some(account), Some(hardware)) = (account, hardware) {
+                out.push(Profile {
+                    username,
+                    account,
+                    hardware,
+                    country,
+                    note,
+                    created_at,
+                    last_run_at,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn delete_profile(&self, username: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM profiles WHERE username=?1", params![username])?;
         Ok(())
     }
 
@@ -355,6 +459,55 @@ mod tests {
         assert_eq!(latest.created_at, 200);
 
         assert!(db.latest_snapshot("khong-co").unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn profile_luu_nap_lai_va_ma_hoa() {
+        let path = std::env::temp_dir().join(format!("mpm_db_prof_{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let db = Db::open_with_key(&path, Some([9u8; 32])).unwrap();
+        let p = Profile {
+            username: "acc1".into(),
+            account: AccountProfile {
+                tiktok_username: "acc1".into(),
+                tiktok_password: "secret-pw".into(),
+                two_fa: "".into(),
+                tiktok_passkey: "".into(),
+                email: "".into(),
+                email_password: "".into(),
+            },
+            hardware: sample().hardware.unwrap(),
+            country: Some("VN".into()),
+            note: "ghi chú".into(),
+            created_at: 100,
+            last_run_at: None,
+        };
+        db.upsert_profile(&p).unwrap();
+
+        // Nạp lại đúng + credential giải mã đúng.
+        let loaded = db.load_profiles().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].username, "acc1");
+        assert_eq!(loaded[0].account.tiktok_password, "secret-pw");
+        assert_eq!(loaded[0].country.as_deref(), Some("VN"));
+
+        // account_json trên đĩa PHẢI mã hóa.
+        let raw: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT account_json FROM profiles WHERE username='acc1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(raw.starts_with("enc:"), "credential phải mã hóa");
+        assert!(!raw.contains("secret-pw"));
+
+        db.delete_profile("acc1").unwrap();
+        assert!(db.load_profiles().unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

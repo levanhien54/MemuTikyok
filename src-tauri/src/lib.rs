@@ -236,6 +236,12 @@ pub fn run() {
             commands::remove_instance,
             commands::rename_instance,
             commands::bulk_action,
+            commands::create_profile,
+            commands::list_profiles,
+            commands::update_profile,
+            commands::run_profile,
+            commands::stop_profile,
+            commands::delete_profile,
             commands::get_settings,
             commands::save_settings,
         ])

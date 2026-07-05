@@ -11,7 +11,7 @@ use crate::adb::AdbWorker;
 use crate::db::Db;
 use crate::geo::IpGeolocator;
 use crate::memuc::MemucClient;
-use crate::model::{AccountProfile, AppSettings, HardwareProfile, Instance};
+use crate::model::{AccountProfile, AppSettings, HardwareProfile, Instance, Profile};
 use crate::queue::CommandQueue;
 use crate::snapshot::SnapshotStore;
 
@@ -46,6 +46,11 @@ pub struct AppState {
     pub create_lock: Mutex<()>,
     /// VM đang chạy phiên automation — chặn phiên TRÙNG trên cùng VM.
     pub running_sessions: Mutex<HashSet<u32>>,
+    /// PROFILE (dữ liệu bền, khóa theo username) — tách khỏi vm_index. Nguồn sự thật
+    /// cho danh sách tài khoản; VM chỉ là pool tạm để chạy profile.
+    pub profiles: Mutex<HashMap<String, Profile>>,
+    /// Ánh xạ profile ĐANG CHẠY → vm_index (bộ nhớ, không persist).
+    pub running_profiles: Mutex<HashMap<String, u32>>,
 }
 
 impl AppState {
@@ -60,6 +65,14 @@ impl AppState {
         metadata: HashMap<u32, InstanceMeta>,
     ) -> Self {
         let queue = CommandQueue::new(settings.max_concurrency as usize);
+        // Nạp profile từ DB → map theo username.
+        let profiles = db
+            .as_ref()
+            .and_then(|d| d.load_profiles().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| (p.username.clone(), p))
+            .collect();
         Self {
             memuc,
             geo,
@@ -73,7 +86,55 @@ impl AppState {
             pool: Mutex::new(VecDeque::new()),
             create_lock: Mutex::new(()),
             running_sessions: Mutex::new(HashSet::new()),
+            profiles: Mutex::new(profiles),
+            running_profiles: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Ghi/cập nhật profile vào bộ nhớ + DB.
+    pub async fn upsert_profile(&self, profile: Profile) {
+        if let Some(db) = &self.db {
+            let _ = db.upsert_profile(&profile);
+        }
+        self.profiles
+            .lock()
+            .await
+            .insert(profile.username.clone(), profile);
+    }
+
+    /// Danh sách profile (đã sắp theo thời điểm tạo).
+    pub async fn list_profiles(&self) -> Vec<Profile> {
+        let mut v: Vec<Profile> = self.profiles.lock().await.values().cloned().collect();
+        v.sort_by_key(|p| p.created_at);
+        v
+    }
+
+    pub async fn get_profile(&self, username: &str) -> Option<Profile> {
+        self.profiles.lock().await.get(username).cloned()
+    }
+
+    pub async fn delete_profile(&self, username: &str) {
+        self.profiles.lock().await.remove(username);
+        self.running_profiles.lock().await.remove(username);
+        if let Some(db) = &self.db {
+            let _ = db.delete_profile(username);
+        }
+    }
+
+    /// vm_index đang chạy profile này (nếu có).
+    pub async fn running_vm_of(&self, username: &str) -> Option<u32> {
+        self.running_profiles.lock().await.get(username).copied()
+    }
+
+    pub async fn set_running_profile(&self, username: &str, vm_index: u32) {
+        self.running_profiles
+            .lock()
+            .await
+            .insert(username.to_string(), vm_index);
+    }
+
+    pub async fn clear_running_profile(&self, username: &str) {
+        self.running_profiles.lock().await.remove(username);
     }
 
     /// Ghi write-through xuống SQLite (best-effort; lỗi chỉ log).
