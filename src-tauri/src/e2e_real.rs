@@ -675,11 +675,14 @@ async fn a9_full_disposable_roundtrip() {
         "marker phải sống sót qua destroy→restore: got={got}, want={payload}"
     );
 
-    // SELinux label + owner đọc-được (app không EACCES).
-    let post_label = vm_shell(&mp, idx2, &format!("ls -Z {marker}"));
-    assert!(
-        post_label.contains("app_data_file"),
-        "label phải app_data_file: {post_label}"
+    // MEmu SELinux DISABLED (ls -Z ra '?' mọi file) → nhãn vô nghĩa; owner mới quyết định
+    // app đọc được (không EACCES). restore chown về owner pkg dir (app-uid).
+    let owner_marker = vm_shell(&mp, idx2, &format!("stat -c %U {marker}"));
+    let owner_dir = vm_shell(&mp, idx2, &format!("stat -c %U /data/data/{TIKTOK_PKG}"));
+    assert_eq!(
+        owner_marker.trim(),
+        owner_dir.trim(),
+        "marker phải cùng owner với app data dir (chown restore đúng)"
     );
 
     // Fingerprint re-applied trên VM mới.
@@ -1079,6 +1082,135 @@ async fn a12_profile_lifecycle_real() {
         "stop khi không chạy phải None"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A.13 — SỐNG-CÒN DỮ LIỆU TIKTOK qua ĐÚNG luồng `profile_ops` + MÔ PHỎNG KHỞI ĐỘNG
+/// LẠI APP. Khác a9 (dùng provision(None)+cài tay+restore tay): test này chạy đúng
+/// production `run`/`stop`, và sau `stop` DỰNG STATE MỚI trỏ cùng thư mục dữ liệu (nạp
+/// lại profiles + snapshot từ SQLite/đĩa) rồi `run` lại — chứng minh dữ liệu "phiên"
+/// TỰ backup lúc stop và TỰ nạp lại lúc run (provision cài TikTok RỒI restore), KHÔNG
+/// cần thao tác tay. Marker tổng hợp thay session (KHÔNG đăng nhập TikTok thật).
+#[tokio::test]
+#[ignore]
+async fn a13_du_lieu_tiktok_song_qua_stop_run_va_khoi_dong_lai() {
+    if !memu_available() {
+        eprintln!("[skip] Không có MEmu");
+        return;
+    }
+    if !std::path::Path::new(DEFAULT_TIKTOK_APK).exists() {
+        eprintln!("[skip] Không có APK tại {DEFAULT_TIKTOK_APK}");
+        return;
+    }
+    let (state, dir) = make_state("a13").await;
+    let mp = memuc_path();
+    let guard = VmGuard::new(mp.clone());
+    let before = index_set(&state).await;
+
+    let marker = format!("/data/data/{TIKTOK_PKG}/files/mpm_marker.txt");
+    let payload = format!("MPM-SESSION-{}-{}", std::process::id(), crate::state::now_ms());
+
+    // create (không VM) + run (provision cài TikTok qua ĐÚNG luồng profile_ops::run).
+    crate::profile_ops::create(&state, acc("acc_data"), None, None)
+        .await
+        .expect("create");
+    let idx1 = crate::profile_ops::run(&state, "acc_data")
+        .await
+        .expect("run 1");
+    guard.track(idx1);
+    assert_new_index(&before, idx1);
+
+    // Ghi "dữ liệu phiên" (marker thay session TikTok) với owner + SELinux đúng.
+    vm_shell(
+        &mp,
+        idx1,
+        &format!(
+            "mkdir -p /data/data/{TIKTOK_PKG}/files && echo {payload} > {marker} && \
+             U=$(stat -c %U /data/data/{TIKTOK_PKG}); chown $U:$U {marker}; restorecon {marker}"
+        ),
+    );
+    let pre = vm_shell(&mp, idx1, &format!("cat {marker}"));
+    assert!(pre.contains(&payload), "marker phải có TRƯỚC stop: {pre}");
+
+    // stop → backup dữ liệu về kho/CSDL + HỦY VM (disposable).
+    let rec = crate::profile_ops::stop(&state, "acc_data")
+        .await
+        .expect("stop")
+        .expect("stop trả snapshot record");
+    guard.untrack(idx1);
+    assert_eq!(rec.sha256.len(), 64, "sha256 64 hex");
+    assert!(rec.size_bytes > 0, "size_bytes > 0");
+    assert!(
+        !index_set(&state).await.contains(&idx1),
+        "VM phải bị hủy sau stop"
+    );
+
+    // === MÔ PHỎNG KHỞI ĐỘNG LẠI APP: state MỚI trỏ CÙNG thư mục dữ liệu (KHÔNG xóa) ===
+    // Nạp lại profiles + snapshot từ SQLite/đĩa như khi mở lại app. Khóa store [5u8;32] +
+    // db None phải KHỚP make_state để đọc được blob đã mã hóa.
+    drop(state); // đóng "phiên app" cũ
+    let store2 = Arc::new(LocalSnapshotStore::new(dir.join("snap"), Some([5u8; 32])).unwrap());
+    let db2 = Db::open_with_key(&dir.join("mpm.db"), None).unwrap();
+    let state2: SharedState = Arc::new(AppState::new(
+        Arc::new(RealMemuc::new(&mp)),
+        Arc::new(MockGeolocator),
+        Arc::new(RealAdbWorker::new(&mp)),
+        store2,
+        AppSettings::default(),
+        Some(db2),
+        std::collections::HashMap::new(),
+    ));
+    // Profile + snapshot phải nạp lại được sau "khởi động lại".
+    assert!(
+        state2.get_profile("acc_data").await.is_some(),
+        "profile phải nạp lại từ SQLite sau khởi động lại"
+    );
+    assert!(
+        state2
+            .db
+            .as_ref()
+            .unwrap()
+            .latest_snapshot("acc_data")
+            .unwrap()
+            .is_some(),
+        "snapshot phải còn sau khởi động lại"
+    );
+
+    // run LẦN 2 trên state MỚI → provision VM mới: cài TikTok RỒI restore snapshot.
+    let idx2 = crate::profile_ops::run(&state2, "acc_data")
+        .await
+        .expect("run 2 sau khởi động lại");
+    guard.track(idx2);
+    // idx2 CÓ THỂ == idx1: memuc tái dùng index vừa giải phóng — đúng mô hình disposable
+    // (VM cũ đã `remove`, VM mới là instance MỚI dù trùng số → disk sạch, không có marker
+    // trừ khi restore đưa vào). KHÔNG assert khác nhau.
+    if idx2 == idx1 {
+        eprintln!("[info] memuc tái dùng index {idx1} cho VM phiên 2 (bình thường)");
+    }
+
+    // BẰNG CHỨNG: marker TỰ nạp lại (KHÔNG restore tay) — dữ liệu TikTok sống qua
+    // destroy VM + khởi động lại app.
+    let got = vm_shell(&mp, idx2, &format!("cat {marker}"));
+    assert!(
+        got.contains(&payload),
+        "dữ liệu TikTok phải TỰ NẠP LẠI qua run_profile: got={got} want={payload}"
+    );
+    // SELinux DISABLED trên MEmu (getenforce=Disabled; `ls -Z` ra '?' cho MỌI file kể cả
+    // app hệ thống) → nhãn vô nghĩa. Cái quyết định app đọc được data restore là OWNER:
+    // restore `chown -R` về owner của pkg dir (= app-uid). Verify owner marker == owner dir.
+    let owner_marker = vm_shell(&mp, idx2, &format!("stat -c %U {marker}"));
+    let owner_dir = vm_shell(&mp, idx2, &format!("stat -c %U /data/data/{TIKTOK_PKG}"));
+    assert_eq!(
+        owner_marker.trim(),
+        owner_dir.trim(),
+        "marker phải cùng owner với app data dir (chown restore đúng → app đọc được, không EACCES)"
+    );
+    assert_ne!(owner_marker.trim(), "root", "owner phải là app-uid, không phải root");
+
+    // cleanup: stop lần cuối (backup + hủy) rồi guard dọn nốt nếu còn.
+    let _ = crate::profile_ops::stop(&state2, "acc_data").await;
+    guard.untrack(idx2);
+    drop(guard);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -122,14 +122,31 @@ impl AdbWorker for RealAdbWorker {
         // Dừng app sạch để flush SQLite ra đĩa (§14.1).
         self.adb(idx, &format!("shell su -c 'am force-stop {pkg}'"))
             .await?;
-        // tar chỉ thư mục cần, loại cache; lấy binary qua exec-out.
+        // Tar TRÊN THIẾT BỊ ra FILE rồi `adb pull` — KHÔNG stream tar qua stdout. Lý do
+        // (kiểm chứng thực trên MEmu): (1) `exec-out su -c '...'` bị memuc TƯỚC nháy đơn →
+        // su hiểu path là user → "Unknown id", tar KHÔNG chạy; (2) memuc chèn dòng
+        // "already connected" vào stdout → hỏng archive nhị phân. `shell su -c '...'` GIỮ
+        // nháy (tar chạy), `adb pull` truyền file nhị phân sạch (không nhiễu/không CRLF).
+        let remote = format!("/data/local/tmp/mpm-backup-{idx}.tar");
         let tar_cmd = format!(
-            "exec-out su -c 'cd /data/data/{pkg} && tar \
+            "shell su -c 'cd /data/data/{pkg} && tar \
              --exclude=cache --exclude=code_cache --exclude=app_webview/*/GPUCache \
-             -cf - shared_prefs databases files app_webview'"
+             -cf {remote} shared_prefs databases files app_webview; chmod 644 {remote}'"
         );
-        let tar = self.adb(idx, &tar_cmd).await?;
-        fs::write(out, &tar)?;
+        self.adb(idx, &tar_cmd).await?;
+        // pull nhị phân-an-toàn (bọc nháy đường dẫn cục bộ: có thể chứa khoảng trắng).
+        self.adb(idx, &format!("pull {remote} \"{}\"", out.display()))
+            .await?;
+        let _ = self.adb(idx, &format!("shell su -c 'rm -f {remote}'")).await;
+
+        // Chặn snapshot RỖNG (tar thất bại toàn bộ / pkg dir không tồn tại) — R-15 không
+        // được ghi bản backup ma rồi hủy VM. Archive hợp lệ tối thiểu (chỉ files/) ~2.5KB.
+        let size = fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            return Err(AppError::CommandFailed(format!(
+                "backup: archive rỗng cho {pkg} (VM idx {idx}) — không có dữ liệu để lưu"
+            )));
+        }
 
         let apk = String::from_utf8_lossy(
             &self
@@ -145,7 +162,7 @@ impl AdbWorker for RealAdbWorker {
 
         Ok(SnapshotMeta {
             sha256: sha256_file(out)?,
-            size_bytes: tar.len() as u64,
+            size_bytes: size,
             apk_version: if apk.is_empty() {
                 "unknown".into()
             } else {
