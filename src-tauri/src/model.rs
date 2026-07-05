@@ -34,6 +34,14 @@ pub struct HardwareProfile {
     pub res_width: u32,
     pub res_height: u32,
     pub dpi: u32,
+    /// Codename thiết bị (ro.product.device) — khớp với build_fingerprint. serde
+    /// default để hồ sơ cũ (chưa có trường này) vẫn nạp được.
+    #[serde(default)]
+    pub device: String,
+    /// ro.build.fingerprint của THIẾT BỊ THẬT, nhất quán với model/brand/device.
+    /// Áp qua resetprop/build.prop sau boot (memuc không set được trường này).
+    #[serde(default)]
+    pub build_fingerprint: String,
 }
 
 impl HardwareProfile {

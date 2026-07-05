@@ -12,11 +12,23 @@ import type {
 
 /** Sinh fingerprint mô phỏng, tất định theo tên tài khoản (cho UI demo). */
 function mockFingerprint(title: string): HardwareProfile {
+  // Bộ device NHẤT QUÁN (model/brand/device khớp buildFingerprint) — khớp bảng Rust.
   const devices = [
-    { model: 'SM-G991B', brand: 'samsung', manufacturer: 'samsung', resWidth: 1080, resHeight: 2400, dpi: 420 },
-    { model: 'Pixel 6', brand: 'google', manufacturer: 'Google', resWidth: 1080, resHeight: 2400, dpi: 420 },
-    { model: 'Redmi Note 8', brand: 'Redmi', manufacturer: 'Xiaomi', resWidth: 1080, resHeight: 2340, dpi: 440 },
-    { model: 'CPH2185', brand: 'OPPO', manufacturer: 'OPPO', resWidth: 720, resHeight: 1600, dpi: 320 },
+    {
+      model: 'SM-N935F', brand: 'samsung', manufacturer: 'samsung', device: 'gracerlte',
+      buildFingerprint: 'samsung/gracerltexx/gracerlte:8.0.0/R16NW/N935FXXS4BRK2:user/release-keys',
+      resWidth: 1440, resHeight: 2560, dpi: 640,
+    },
+    {
+      model: 'SM-G960F', brand: 'samsung', manufacturer: 'samsung', device: 'starlte',
+      buildFingerprint: 'samsung/starltexx/starlte:10/QP1A.190711.020/G960FXXUFFUJ1:user/release-keys',
+      resWidth: 1080, resHeight: 2220, dpi: 480,
+    },
+    {
+      model: 'Redmi Note 8', brand: 'Redmi', manufacturer: 'Xiaomi', device: 'ginkgo',
+      buildFingerprint: 'Redmi/ginkgo/ginkgo:11/RP1A.200720.011/V12.5.1.0.RCOMIXM:user/release-keys',
+      resWidth: 1080, resHeight: 2340, dpi: 440,
+    },
   ];
   let h = 0;
   for (const ch of title) h = (h * 31 + ch.charCodeAt(0)) >>> 0;

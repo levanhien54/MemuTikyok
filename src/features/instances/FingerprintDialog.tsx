@@ -93,6 +93,7 @@ export function FingerprintDialog({ open, accountName, hardware, onClose }: Prop
                   <Row label="Model" value={hardware.model} />
                   <Row label="Hãng (brand)" value={hardware.brand} />
                   <Row label="Nhà sản xuất" value={hardware.manufacturer} />
+                  {hardware.device ? <Row label="Device (codename)" value={hardware.device} /> : null}
                   <Row label="IMEI" value={hardware.imei} />
                   <Row label="Android ID" value={hardware.androidId} />
                   <Row label="MAC" value={hardware.mac} />
@@ -101,6 +102,9 @@ export function FingerprintDialog({ open, accountName, hardware, onClose }: Prop
                     value={`${hardware.resWidth} × ${hardware.resHeight}`}
                   />
                   <Row label="DPI" value={String(hardware.dpi)} />
+                  {hardware.buildFingerprint ? (
+                    <Row label="Build fingerprint" value={hardware.buildFingerprint} />
+                  ) : null}
                 </div>
                 <p className="mt-3 text-[11px] leading-snug text-fg-muted">
                   ⚠️ Đây là fingerprint <b>đã lưu</b> cho tài khoản (áp khi khởi chạy). Riêng

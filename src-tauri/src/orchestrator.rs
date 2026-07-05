@@ -404,6 +404,9 @@ mod tests {
             res_width: 1080,
             res_height: 1920,
             dpi: 320,
+            device: "frd".into(),
+            build_fingerprint: "HUAWEI/FRD-L19/HWFRD:8.0.0/HUAWEIFRD-L19/380C431:user/release-keys"
+                .into(),
         }
     }
 

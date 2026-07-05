@@ -5,16 +5,79 @@
 use crate::error::{AppError, AppResult};
 use crate::model::HardwareProfile;
 
-/// Mẫu thiết bị thật (model, brand, manufacturer, rộng, cao, dpi).
-const DEVICES: &[(&str, &str, &str, u32, u32, u32)] = &[
-    ("SM-G991B", "samsung", "samsung", 1080, 2400, 420), // Galaxy S21
-    ("SM-G973F", "samsung", "samsung", 1080, 2280, 420), // Galaxy S10
-    ("SM-A515F", "samsung", "samsung", 1080, 2400, 420), // Galaxy A51
-    ("Pixel 6", "google", "Google", 1080, 2400, 420),
-    ("Redmi Note 8", "Redmi", "Xiaomi", 1080, 2340, 440),
-    ("M2101K6G", "Redmi", "Xiaomi", 1080, 2400, 440), // Redmi Note 10
-    ("CPH2185", "OPPO", "OPPO", 720, 1600, 320),      // OPPO A54
-    ("V2027", "vivo", "vivo", 1080, 2408, 408),       // vivo Y51
+/// Hồ sơ thiết bị THẬT, NHẤT QUÁN NỘI BỘ: model/brand/manufacturer/device khớp với
+/// `ro.build.fingerprint`. Dùng thiết bị đời cũ (Android 8–11) — tránh Pixel mới/beta
+/// bị gate hardware attestation (xem docs/ANTI_DETECTION_UPGRADE.md).
+///
+/// ⚠️ Mọi `fingerprint` phải là build THẬT của thiết bị (ByteDance có thể đối chiếu).
+/// Mở rộng bảng bằng bộ đã kiểm chứng, KHÔNG bịa build id.
+struct DeviceProfile {
+    model: &'static str,
+    brand: &'static str,
+    manufacturer: &'static str,
+    device: &'static str,
+    fingerprint: &'static str,
+    w: u32,
+    h: u32,
+    dpi: u32,
+}
+
+const DEVICES: &[DeviceProfile] = &[
+    // Samsung Galaxy Note FE (bộ đã verify qua deep-research).
+    DeviceProfile {
+        model: "SM-N935F",
+        brand: "samsung",
+        manufacturer: "samsung",
+        device: "gracerlte",
+        fingerprint: "samsung/gracerltexx/gracerlte:8.0.0/R16NW/N935FXXS4BRK2:user/release-keys",
+        w: 1440,
+        h: 2560,
+        dpi: 640,
+    },
+    // Samsung Galaxy S9 (SM-G960F, starlte).
+    DeviceProfile {
+        model: "SM-G960F",
+        brand: "samsung",
+        manufacturer: "samsung",
+        device: "starlte",
+        fingerprint: "samsung/starltexx/starlte:10/QP1A.190711.020/G960FXXUFFUJ1:user/release-keys",
+        w: 1080,
+        h: 2220,
+        dpi: 480,
+    },
+    // Samsung Galaxy S8 (SM-G950F, dreamlte).
+    DeviceProfile {
+        model: "SM-G950F",
+        brand: "samsung",
+        manufacturer: "samsung",
+        device: "dreamlte",
+        fingerprint: "samsung/dreamltexx/dreamlte:9/PPR1.180610.011/G950FXXUCDUE1:user/release-keys",
+        w: 1080,
+        h: 2220,
+        dpi: 480,
+    },
+    // Samsung Galaxy A50 (SM-A505F, a50).
+    DeviceProfile {
+        model: "SM-A505F",
+        brand: "samsung",
+        manufacturer: "samsung",
+        device: "a50",
+        fingerprint: "samsung/a50xx/a50:11/RP1A.200720.012/A505FDDU7CUB1:user/release-keys",
+        w: 1080,
+        h: 2340,
+        dpi: 420,
+    },
+    // Xiaomi Redmi Note 8 (ginkgo).
+    DeviceProfile {
+        model: "Redmi Note 8",
+        brand: "Redmi",
+        manufacturer: "Xiaomi",
+        device: "ginkgo",
+        fingerprint: "Redmi/ginkgo/ginkgo:11/RP1A.200720.011/V12.5.1.0.RCOMIXM:user/release-keys",
+        w: 1080,
+        h: 2340,
+        dpi: 440,
+    },
 ];
 
 fn rand_bytes(n: usize) -> AppResult<Vec<u8>> {
@@ -63,20 +126,22 @@ fn gen_mac() -> AppResult<String> {
         .join(":"))
 }
 
-/// Sinh một hồ sơ phần cứng ngẫu nhiên hợp lệ.
+/// Sinh một hồ sơ phần cứng ngẫu nhiên hợp lệ (bộ device NHẤT QUÁN + fingerprint thật).
 pub fn generate() -> AppResult<HardwareProfile> {
     let pick = rand_bytes(1)?[0] as usize % DEVICES.len();
-    let (model, brand, manufacturer, w, h, dpi) = DEVICES[pick];
+    let d = &DEVICES[pick];
     Ok(HardwareProfile {
-        model: model.to_string(),
-        brand: brand.to_string(),
-        manufacturer: manufacturer.to_string(),
+        model: d.model.to_string(),
+        brand: d.brand.to_string(),
+        manufacturer: d.manufacturer.to_string(),
         imei: gen_imei()?,
         android_id: gen_android_id()?,
         mac: gen_mac()?,
-        res_width: w,
-        res_height: h,
-        dpi,
+        res_width: d.w,
+        res_height: d.h,
+        dpi: d.dpi,
+        device: d.device.to_string(),
+        build_fingerprint: d.fingerprint.to_string(),
     })
 }
 

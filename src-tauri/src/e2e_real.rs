@@ -62,6 +62,9 @@ fn hw() -> HardwareProfile {
         res_width: 1080,
         res_height: 1920,
         dpi: 320,
+        device: "frd".into(),
+        build_fingerprint: "HUAWEI/FRD-L19/HWFRD:8.0.0/HUAWEIFRD-L19/380C431:user/release-keys"
+            .into(),
     }
 }
 
@@ -78,6 +81,9 @@ fn hw_new() -> HardwareProfile {
         res_width: 1080,
         res_height: 2400,
         dpi: 420,
+        device: "oriole".into(),
+        build_fingerprint: "google/oriole/oriole:12/SD1A.210817.036/7805805:user/release-keys"
+            .into(),
     }
 }
 

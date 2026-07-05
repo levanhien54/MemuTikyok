@@ -57,6 +57,10 @@ export interface HardwareProfile {
   resWidth: number;
   resHeight: number;
   dpi: number;
+  /** Codename thiết bị (ro.product.device). Optional cho hồ sơ cũ. */
+  device?: string;
+  /** ro.build.fingerprint của thiết bị thật, nhất quán với model. Optional cho hồ sơ cũ. */
+  buildFingerprint?: string;
 }
 
 /** Payload tạo VM kèm hồ sơ tài khoản + ghi chú. */
