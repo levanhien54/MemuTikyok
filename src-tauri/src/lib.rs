@@ -10,6 +10,7 @@ mod e2e_real;
 mod error;
 mod fingerprint;
 mod geo;
+mod humanize;
 mod memuc;
 mod model;
 mod orchestrator;
@@ -227,6 +228,8 @@ pub fn run() {
             commands::list_apps,
             commands::scan_emulator,
             commands::harden_vm,
+            commands::human_tap,
+            commands::human_swipe,
             commands::get_hardware,
             commands::remove_instance,
             commands::rename_instance,

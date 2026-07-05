@@ -940,6 +940,12 @@ impl AdbWorker for FailingBackupAdb {
     ) -> AppResult<bool> {
         self.0.lock_device_identity(idx, hw).await
     }
+    async fn human_tap(&self, idx: u32, x: i32, y: i32) -> AppResult<()> {
+        self.0.human_tap(idx, x, y).await
+    }
+    async fn human_swipe(&self, idx: u32, x0: i32, y0: i32, x1: i32, y1: i32) -> AppResult<()> {
+        self.0.human_swipe(idx, x0, y0, x1, y1).await
+    }
 }
 
 /// A.10 — R-15 nghiêm: backup thất bại KHÔNG hủy VM.

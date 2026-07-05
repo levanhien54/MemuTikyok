@@ -313,6 +313,25 @@ pub async fn harden_vm(index: u32, state: State<'_, SharedState>) -> AppResult<(
     state.adb.harden(index).await
 }
 
+/// Tap GIẢ NGƯỜI (rung tọa độ + giữ ngẫu nhiên) — chống dò tự động hóa.
+#[tauri::command]
+pub async fn human_tap(index: u32, x: i32, y: i32, state: State<'_, SharedState>) -> AppResult<()> {
+    state.adb.human_tap(index, x, y).await
+}
+
+/// Swipe GIẢ NGƯỜI (đường cong + timing ngẫu nhiên) — chống dò tự động hóa.
+#[tauri::command]
+pub async fn human_swipe(
+    index: u32,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    state: State<'_, SharedState>,
+) -> AppResult<()> {
+    state.adb.human_swipe(index, x0, y0, x1, y1).await
+}
+
 /// Lấy fingerprint (đã lưu DB) của một VM để hiển thị.
 #[tauri::command]
 pub async fn get_hardware(

@@ -13,6 +13,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 use crate::error::{AppError, AppResult};
+use crate::humanize::{self, Rng};
 use crate::model::{EmulatorTell, HardwareProfile, SnapshotMeta};
 use crate::snapshot::sha256_file;
 
@@ -49,6 +50,10 @@ pub trait AdbWorker: Send + Sync {
     /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop (cần Magisk trong base
     /// image — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool>;
+    /// Tap **GIẢ NGƯỜI**: rung tọa độ + thời gian giữ ngẫu nhiên (chống dò tự động hóa).
+    async fn human_tap(&self, idx: u32, x: i32, y: i32) -> AppResult<()>;
+    /// Swipe **GIẢ NGƯỜI**: tọa độ rung + thời lượng ngẫu nhiên (chống touch-jitter check).
+    async fn human_swipe(&self, idx: u32, x0: i32, y0: i32, x1: i32, y1: i32) -> AppResult<()>;
 }
 
 // ------------------------ Real (memuc adb) ------------------------
@@ -396,6 +401,37 @@ impl AdbWorker for RealAdbWorker {
         // 3) Verify: model runtime đã bằng giá trị ta khóa chưa.
         Ok(self.prop(idx, "ro.product.model").await == hw.model)
     }
+
+    async fn human_tap(&self, idx: u32, x: i32, y: i32) -> AppResult<()> {
+        let (jx, jy, hold) = humanize::human_tap(x, y, &mut Rng::from_entropy());
+        // `input swipe` tới CÙNG điểm với thời lượng = giữ ngón → tap có press-duration.
+        self.adb(
+            idx,
+            &format!("shell input swipe {jx} {jy} {jx} {jy} {hold}"),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn human_swipe(&self, idx: u32, x0: i32, y0: i32, x1: i32, y1: i32) -> AppResult<()> {
+        let mut rng = Rng::from_entropy();
+        let path = humanize::human_swipe((x0, y0), (x1, y1), &mut rng);
+        // Dùng endpoint ĐÃ RUNG + tổng thời lượng ngẫu nhiên. (Đường cong Bézier đầy đủ
+        // trong `path` dành cho executor sendevent tương lai; `input swipe` chỉ nhận 2 đầu.)
+        // path luôn có ≥17 điểm (human_swipe) nên first/last an toàn.
+        let a = path[0];
+        let b = path[path.len() - 1];
+        let total: u64 = path.iter().map(|s| s.delay_ms).sum::<u64>().max(50);
+        self.adb(
+            idx,
+            &format!(
+                "shell input swipe {} {} {} {} {}",
+                a.x, a.y, b.x, b.y, total
+            ),
+        )
+        .await
+        .map(|_| ())
+    }
 }
 
 // ------------------------ Mock (in-memory) ------------------------
@@ -562,6 +598,21 @@ impl AdbWorker for MockAdbWorker {
             .unwrap()
             .insert(idx, hw.model.clone());
         Ok(true)
+    }
+
+    async fn human_tap(&self, _idx: u32, _x: i32, _y: i32) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn human_swipe(
+        &self,
+        _idx: u32,
+        _x0: i32,
+        _y0: i32,
+        _x1: i32,
+        _y1: i32,
+    ) -> AppResult<()> {
+        Ok(())
     }
 }
 
