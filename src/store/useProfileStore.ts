@@ -47,7 +47,16 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       },
       (index, message) => toast.error(`Phiên VM #${index} lỗi: ${message}`),
     );
-    return unsub;
+    // Poll định kỳ: giữ badge "đang chạy VM #N" đồng bộ nếu VM bị hủy ngoài luồng app.
+    const poll = setInterval(() => void get().refresh(), 5000);
+    // Refresh khi cửa sổ được focus lại (người dùng quay lại app).
+    const onFocus = () => void get().refresh();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      unsub();
+      clearInterval(poll);
+      window.removeEventListener('focus', onFocus);
+    };
   },
 
   async refresh() {

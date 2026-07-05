@@ -3,6 +3,22 @@
 > Tổng hợp deep-research (106 agent, verify đối kháng 3-phiếu) + đối chiếu với các
 > phát hiện chạy-thật của MPM. Mọi claim dưới đây ở mức **high-confidence, có nguồn**.
 
+> **⚠️ TRẦN CHỐNG-PHÁT-HIỆN (đọc trước mọi thứ):** Trên MEmu **x86**, hai tell
+> **native-bridge** (ARM→x86) và **hypervisor flag** là **CỐ HỮU** — không công cụ nào
+> (kể cả Redroid-x86) gỡ được → **KHÔNG THỂ** đạt "máy ảo không thể phát hiện". MPM chỉ
+> giảm bề mặt lộ ở các trường **SỬA ĐƯỢC**: độ phân giải/DPI, MAC, ẩn root.
+>
+> ⚠️ Riêng **`ro.product.model`** (MEmu random khi boot) và **`android_id`** (GMS ghi đè
+> SAU khi cài+chạy TikTok — Android 8+ cấp id theo app) CHỈ khóa được khi có **Magisk +
+> resetprop** trong base image. Hiện `lock_device_identity` trả `Ok(false)` (no-op) nếu
+> thiếu Magisk → `build_fingerprint` "coherent" ở fingerprint.rs **CÓ THỂ lệch** model
+> runtime. Vậy "MPM đã làm vậy" ở các mục dưới CHỈ đúng KHI đã dựng base image Magisk
+> (xem [`BASE_IMAGE_MAGISK_SETUP.md`](BASE_IMAGE_MAGISK_SETUP.md)); **mặc định là chưa**.
+>
+> Cổng "quốc gia yêu cầu" chỉ kiểm **IP thoát của HOST** (mọi VM chung NAT host) — là
+> phép kiểm VPN mức-host, KHÔNG cách ly geo per-account. Chạy nhiều account cùng 1 IP
+> vẫn là rủi ro liên-kết-thiết-bị lớn nhất còn lại.
+
 ## 1. Bức tranh tell còn lộ & bản chất
 
 | Tell | Bản chất | Che được không? |

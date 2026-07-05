@@ -11,7 +11,7 @@ use crate::adb::AdbWorker;
 use crate::db::Db;
 use crate::geo::IpGeolocator;
 use crate::memuc::MemucClient;
-use crate::model::{AccountProfile, AppSettings, HardwareProfile, Instance, Profile};
+use crate::model::{AccountProfile, AppSettings, HardwareProfile, Profile};
 use crate::queue::CommandQueue;
 use crate::snapshot::SnapshotStore;
 
@@ -49,8 +49,6 @@ pub struct AppState {
     pub adb: Arc<dyn AdbWorker>,
     pub store: Arc<dyn SnapshotStore>,
     pub queue: CommandQueue,
-    /// Snapshot instance gần nhất (nguồn cấp cho UI, cập nhật bởi poller).
-    pub registry: Mutex<Vec<Instance>>,
     pub settings: Mutex<AppSettings>,
     /// Metadata theo index VM (bộ nhớ, đồng bộ với SQLite).
     pub metadata: Mutex<HashMap<u32, InstanceMeta>>,
@@ -94,7 +92,6 @@ impl AppState {
             adb,
             store,
             queue,
-            registry: Mutex::new(Vec::new()),
             settings: Mutex::new(settings),
             metadata: Mutex::new(metadata),
             db,
@@ -197,20 +194,6 @@ impl AppState {
         }
     }
 
-    /// Gộp metadata (account, last_launched_at, country, note) vào danh sách từ memuc.
-    pub async fn merge_metadata(&self, mut instances: Vec<Instance>) -> Vec<Instance> {
-        let meta = self.metadata.lock().await;
-        for inst in &mut instances {
-            if let Some(m) = meta.get(&inst.index) {
-                inst.account = m.account.clone();
-                inst.last_launched_at = m.last_launched_at;
-                inst.country = m.country.clone();
-                inst.note = m.note.clone();
-            }
-        }
-        instances
-    }
-
     pub async fn mark_launched(&self, index: u32) {
         let entry = {
             let mut meta = self.metadata.lock().await;
@@ -228,21 +211,6 @@ impl AppState {
             .await
             .get(&index)
             .and_then(|m| m.hardware.clone())
-    }
-
-    /// Chỉ gán country nếu chưa có; trả về true nếu vừa cập nhật.
-    pub async fn set_country_if_empty(&self, index: u32, country: String) -> bool {
-        let entry = {
-            let mut meta = self.metadata.lock().await;
-            let e = meta.entry(index).or_default();
-            if e.country.is_some() {
-                return false;
-            }
-            e.country = Some(country);
-            e.clone()
-        };
-        self.persist(index, &entry);
-        true
     }
 
     pub async fn forget(&self, index: u32) {

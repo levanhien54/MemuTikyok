@@ -131,8 +131,3 @@ export interface AppSettings {
   /** Đường dẫn APK TikTok (null = dùng mặc định). */
   tiktokApkPath: string | null;
 }
-
-/** Payload sự kiện đẩy từ backend (§8.4 SRS). */
-export interface InstancesUpdateEvent {
-  instances: Instance[];
-}

@@ -187,13 +187,6 @@ pub struct SnapshotRecord {
     pub created_at: i64,
 }
 
-/// Payload cho sự kiện đẩy `instances:update` (§8.4 SRS).
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InstancesUpdateEvent {
-    pub instances: Vec<Instance>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

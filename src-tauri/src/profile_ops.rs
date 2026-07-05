@@ -134,6 +134,8 @@ pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
         return Ok(vm);
     }
     // Cổng quốc gia (validation TRƯỚC khi chiếm slot): IP thoát thực tế phải khớp.
+    // ⚠️ Đây là kiểm IP thoát của HOST (mọi VM chung NAT host) — phép kiểm VPN mức-host,
+    // KHÔNG phải cách ly geo per-account. Nhiều account cùng 1 IP vẫn liên-kết được.
     if let Some(expected) = profile.country.as_deref().filter(|c| !c.is_empty()) {
         match state.geo.country("").await {
             Some(actual) if actual.eq_ignore_ascii_case(expected) => {}

@@ -14,7 +14,6 @@ mod humanize;
 mod memuc;
 mod model;
 mod orchestrator;
-mod poller;
 mod profile_ops;
 mod queue;
 mod runner;
@@ -195,14 +194,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
-        .manage(app_state.clone())
-        .setup(move |app| {
-            // Khởi động poller nền (§8.3).
-            let handle = app.handle().clone();
-            let state = app_state.clone();
-            tauri::async_runtime::spawn(poller::run(handle, state));
-            Ok(())
-        })
+        .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             // Vòng đời PROFILE (disposable: profile = dữ liệu, VM = tạo mới mỗi lần chạy).
             commands::create_profile,

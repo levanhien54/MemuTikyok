@@ -206,9 +206,15 @@ pub async fn teardown(
     // 1) Backup (bắt buộc thành công trước khi hủy — R-15).
     let record = backup_and_record(state, index, account_key).await?;
 
-    // 2) Hủy VM (best-effort stop rồi remove) + quên metadata cục bộ.
+    // 2) Hủy VM. stop best-effort; remove có thể chập chờn (VM chưa dừng hẳn) → thử
+    // lại 1 lần sau khi stop. Nếu vẫn lỗi → trả Err: caller (profile stop/delete) sẽ
+    // TÁI theo dõi VM để người dùng thử lại, không để VM mồ côi vô chủ.
     let _ = state.memuc.stop(index).await;
-    state.memuc.remove(index).await?;
+    if let Err(e) = state.memuc.remove(index).await {
+        tracing::warn!(index, error = %e, "remove VM lỗi — thử lại sau khi stop");
+        let _ = state.memuc.stop(index).await;
+        state.memuc.remove(index).await?;
+    }
     state.forget(index).await;
 
     Ok(record)
