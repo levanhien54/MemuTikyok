@@ -108,6 +108,12 @@ pub async fn get_settings(state: State<'_, SharedState>) -> AppResult<AppSetting
     Ok(state.settings.lock().await.clone())
 }
 
+/// Log ứng dụng gần nhất (ring buffer) để LogsView hiển thị — chẩn đoán khi Chạy lỗi.
+#[tauri::command]
+pub async fn get_logs(logs: State<'_, crate::logcap::LogBuffer>) -> AppResult<Vec<String>> {
+    Ok(logs.lock().unwrap().iter().cloned().collect())
+}
+
 #[tauri::command]
 pub async fn save_settings(
     mut settings: AppSettings,

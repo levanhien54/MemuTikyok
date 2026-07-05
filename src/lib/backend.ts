@@ -45,9 +45,11 @@ export interface Backend {
     onError: (index: number, message: string) => void,
   ): () => void;
 
-  // ── Cài đặt ──
+  // ── Cài đặt + chẩn đoán ──
   getSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<AppSettings>;
+  /** Log ứng dụng gần nhất (ring buffer) — cho LogsView chẩn đoán khi Chạy lỗi. */
+  getLogs(): Promise<string[]>;
 }
 
 /** True khi đang chạy bên trong Tauri (có bridge IPC). */

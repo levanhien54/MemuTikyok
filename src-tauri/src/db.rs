@@ -52,6 +52,10 @@ impl Db {
                 note          TEXT NOT NULL DEFAULT '',
                 created_at    INTEGER NOT NULL,
                 last_run_at   INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS running_vms (
+                username  TEXT PRIMARY KEY,
+                vm_index  INTEGER NOT NULL
             );",
         )?;
         // Migration: thêm cột hardware_json cho DB tạo trước bản này (bỏ qua nếu đã có).
@@ -251,6 +255,41 @@ impl Db {
     pub fn delete_profile(&self, username: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM profiles WHERE username=?1", params![username])?;
+        Ok(())
+    }
+
+    // ── running_vms: persist ánh xạ profile→VM đang chạy để RECONCILE sau khi app
+    //    khởi động lại (crash giữa phiên → VM còn sống nhưng MPM quên → mồ côi). ──
+
+    /// Ghi (username→vm_index) đang chạy (INSERT OR REPLACE).
+    pub fn record_running(&self, username: &str, vm_index: u32) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO running_vms(username, vm_index) VALUES(?1, ?2)",
+            params![username, vm_index],
+        )?;
+        Ok(())
+    }
+
+    /// Xóa bản ghi running của một profile (khi stop/delete/nhả chỗ).
+    pub fn remove_running(&self, username: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM running_vms WHERE username=?1", params![username])?;
+        Ok(())
+    }
+
+    /// Toàn bộ (username, vm_index) đã persist — dùng lúc khởi động để reconcile.
+    pub fn load_running(&self) -> rusqlite::Result<Vec<(String, u32)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT username, vm_index FROM running_vms")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?)))?;
+        rows.collect()
+    }
+
+    /// Xóa sạch bảng running (sau khi reconcile xong lúc khởi động).
+    pub fn clear_running(&self) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM running_vms", [])?;
         Ok(())
     }
 

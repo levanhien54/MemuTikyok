@@ -11,6 +11,7 @@ mod error;
 mod fingerprint;
 mod geo;
 mod humanize;
+mod logcap;
 mod memuc;
 mod model;
 mod orchestrator;
@@ -181,6 +182,10 @@ fn init_db() -> (Option<Db>, HashMap<u32, InstanceMeta>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Bắt log của app (tracing) vào ring buffer cho LogsView + stderr. Phải cài TRƯỚC
+    // mọi tracing::* để không rơi log khởi tạo.
+    let log_buffer = logcap::init();
+
     let settings = load_settings();
     let memuc = build_memuc(&settings);
     // Tra IP→quốc gia thật qua ip-api.com (free, HTTP). Cache theo IP.
@@ -191,10 +196,22 @@ pub fn run() {
     let app_state: state::SharedState = Arc::new(AppState::new(
         memuc, geo, adb, store, settings, db, metadata,
     ));
+    let reconcile_state = app_state.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().build())
         .manage(app_state)
+        .manage(log_buffer)
+        .setup(move |_app| {
+            // RECONCILE khởi động: dọn VM mồ côi từ phiên trước (crash/tắt đột ngột).
+            tauri::async_runtime::spawn(async move {
+                let n = profile_ops::reconcile_startup(&reconcile_state).await;
+                if n > 0 {
+                    tracing::info!(cleaned = n, "Reconcile khởi động: đã dọn VM mồ côi");
+                }
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             // Vòng đời PROFILE (disposable: profile = dữ liệu, VM = tạo mới mỗi lần chạy).
             commands::create_profile,
@@ -206,9 +223,10 @@ pub fn run() {
             // Tiện ích trên VM đang chạy của profile.
             commands::scan_emulator,
             commands::run_watch_session,
-            // Cài đặt.
+            // Cài đặt + chẩn đoán.
             commands::get_settings,
             commands::save_settings,
+            commands::get_logs,
         ])
         .run(tauri::generate_context!())
         .expect("Lỗi khởi chạy ứng dụng MPM");

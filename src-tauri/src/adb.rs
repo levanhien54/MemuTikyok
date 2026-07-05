@@ -372,6 +372,30 @@ impl AdbWorker for RealAdbWorker {
             detail: bc,
         });
 
+        // Base image sẵn-sàng-Magisk? resetprop có → khóa được ro.product.model/android_id
+        // (chống MEmu random model). KHÔNG có → model bị ghi đè, fingerprint coherent lệch.
+        let rp = String::from_utf8_lossy(
+            &self
+                .adb(
+                    idx,
+                    "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo yes && break; done'",
+                )
+                .await
+                .unwrap_or_default(),
+        )
+        .to_lowercase();
+        let has_resetprop = rp.contains("resetprop") || rp.contains("yes");
+        tells.push(EmulatorTell {
+            check: "Magisk/resetprop (khóa model)".into(),
+            // detected=true = CÓ VẤN ĐỀ: thiếu resetprop → model KHÔNG khóa được.
+            detected: !has_resetprop,
+            detail: if has_resetprop {
+                "có resetprop — khóa được model/android_id".into()
+            } else {
+                "THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)".into()
+            },
+        });
+
         Ok(tells)
     }
 
@@ -593,6 +617,11 @@ impl AdbWorker for MockAdbWorker {
                 check: "GPU renderer ảo".into(),
                 detected: false,
                 detail: "GPU thật (Adreno/Mali)".into(),
+            },
+            EmulatorTell {
+                check: "Magisk/resetprop (khóa model)".into(),
+                detected: true,
+                detail: "THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)".into(),
             },
         ])
     }

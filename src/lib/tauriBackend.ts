@@ -55,5 +55,8 @@ export function createTauriBackend(): Backend {
     saveSettings(settings) {
       return invoke<AppSettings>('save_settings', { settings });
     },
+    getLogs() {
+      return invoke<string[]>('get_logs');
+    },
   };
 }

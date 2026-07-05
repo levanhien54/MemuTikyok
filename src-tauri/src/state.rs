@@ -130,6 +130,7 @@ impl AppState {
         self.running_profiles.lock().unwrap().remove(username);
         if let Some(db) = &self.db {
             let _ = db.delete_profile(username);
+            let _ = db.remove_running(username);
         }
     }
 
@@ -155,10 +156,17 @@ impl AppState {
             .lock()
             .unwrap()
             .insert(username.to_string(), vm_index);
+        // Persist để reconcile được sau crash (chỉ ghi idx THẬT, không ghi RESERVED).
+        if let Some(db) = &self.db {
+            let _ = db.record_running(username, vm_index);
+        }
     }
 
     pub async fn clear_running_profile(&self, username: &str) {
         self.running_profiles.lock().unwrap().remove(username);
+        if let Some(db) = &self.db {
+            let _ = db.remove_running(username);
+        }
     }
 
     /// NGUYÊN TỬ: kiểm idempotency + cổng tối đa RỒI đặt chỗ slot — tất cả dưới MỘT
@@ -182,14 +190,22 @@ impl AppState {
     /// NGUYÊN TỬ lấy-và-xóa vm_index đang chạy (bỏ qua slot đặt chỗ). Chỉ MỘT caller
     /// thắng entry → chống teardown đôi khi hai `stop`/`delete` chạy song song.
     pub async fn take_running_vm(&self, username: &str) -> Option<u32> {
-        let mut g = self.running_profiles.lock().unwrap();
-        match g.get(username).copied() {
-            Some(v) if v != RESERVED_VM => {
-                g.remove(username);
-                Some(v)
+        let taken = {
+            let mut g = self.running_profiles.lock().unwrap();
+            match g.get(username).copied() {
+                Some(v) if v != RESERVED_VM => {
+                    g.remove(username);
+                    Some(v)
+                }
+                _ => None,
             }
-            _ => None,
+        };
+        if taken.is_some() {
+            if let Some(db) = &self.db {
+                let _ = db.remove_running(username);
+            }
         }
+        taken
     }
 
     /// Ghi write-through xuống SQLite (best-effort; lỗi chỉ log).

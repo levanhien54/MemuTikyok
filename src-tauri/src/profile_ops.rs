@@ -312,6 +312,47 @@ pub async fn delete(state: &SharedState, username: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// RECONCILE lúc KHỞI ĐỘNG: `running_profiles` chỉ ở bộ nhớ nên sau crash/tắt-đột-ngột,
+/// VM còn sống trong MEmu nhưng MPM đã quên → **mồ côi** (không hiện ở đâu, chiếm slot,
+/// ngốn RAM). Đọc lại bảng `running_vms` đã persist; VM nào CÒN trong `listvms` = mồ côi
+/// phiên trước → HỦY (session chưa kịp backup coi như bỏ — backup CŨ vẫn còn; đúng tinh
+/// thần disposable). Xong xóa sạch bảng. Trả về số VM đã dọn.
+///
+/// An toàn: chỉ đụng VM có trong bảng persist của MPM (không bao giờ chạm VM người dùng);
+/// nếu `listvms` lỗi thì BỎ QUA lần này (không xóa bảng) để thử lại lần khởi động sau.
+pub async fn reconcile_startup(state: &SharedState) -> usize {
+    let Some(db) = state.db.as_ref() else {
+        return 0;
+    };
+    let persisted = db.load_running().unwrap_or_default();
+    if persisted.is_empty() {
+        return 0;
+    }
+    let live: std::collections::HashSet<u32> = match state.memuc.list_instances().await {
+        Ok(v) => v.into_iter().map(|i| i.index).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "Reconcile khởi động: không liệt kê được VM — bỏ qua");
+            return 0;
+        }
+    };
+    let mut cleaned = 0;
+    for (username, idx) in persisted {
+        if live.contains(&idx) {
+            tracing::warn!(
+                username = %username,
+                idx,
+                "Reconcile: hủy VM mồ côi từ phiên trước (crash/tắt đột ngột)"
+            );
+            let _ = state.memuc.stop(idx).await;
+            let _ = state.memuc.remove(idx).await;
+            state.forget(idx).await;
+            cleaned += 1;
+        }
+    }
+    let _ = db.clear_running();
+    cleaned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +512,31 @@ mod tests {
         let state = make_state("stop", Arc::new(MockGeolocator));
         create(&state, acc("acc_s"), None, None).await.unwrap();
         assert!(stop(&state, "acc_s").await.unwrap().is_none(), "không chạy → None");
+    }
+
+    #[tokio::test]
+    async fn reconcile_don_vm_mo_coi() {
+        // Mô phỏng crash: persist một VM "đang chạy", xóa map bộ nhớ (như sau khởi động
+        // lại), VM vẫn tồn tại trong memuc → reconcile phải HỦY nó + xóa bảng running.
+        let state = make_state("recon", Arc::new(MockGeolocator));
+        let idx = state.memuc.list_instances().await.unwrap()[0].index;
+        state.set_running_profile("ghost", idx).await; // persist db + memory
+        state.running_profiles.lock().unwrap().clear(); // mô phỏng mất memory sau restart
+        let cleaned = reconcile_startup(&state).await;
+        assert_eq!(cleaned, 1, "phải dọn 1 VM mồ côi");
+        let live: Vec<u32> = state
+            .memuc
+            .list_instances()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.index)
+            .collect();
+        assert!(!live.contains(&idx), "VM mồ côi đã bị hủy");
+        assert!(
+            state.db.as_ref().unwrap().load_running().unwrap().is_empty(),
+            "bảng running đã được dọn"
+        );
     }
 
     #[tokio::test]

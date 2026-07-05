@@ -439,7 +439,7 @@ async fn a4_provision_fingerprint_inject() {
         .scan_emulator_tells(idx)
         .await
         .expect("scan_emulator_tells");
-    assert_eq!(tells.len(), 7, "phải có đúng 7 mục scan: {tells:?}");
+    assert_eq!(tells.len(), 8, "phải có đúng 8 mục scan: {tells:?}");
     let by_check = |name: &str| tells.iter().find(|t| t.check == name);
     for name in [
         "Native Bridge (ARM→x86)",
@@ -449,6 +449,7 @@ async fn a4_provision_fingerprint_inject() {
         "vboxsf mount",
         "GPU renderer ảo",
         "ro.build.characteristics",
+        "Magisk/resetprop (khóa model)",
     ] {
         assert!(by_check(name).is_some(), "thiếu mục scan '{name}'");
     }

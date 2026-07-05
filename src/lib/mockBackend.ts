@@ -177,6 +177,11 @@ export function createMockBackend(): Backend {
         { check: 'ro.kernel.qemu', detected: false, detail: 'rỗng' },
         { check: 'File QEMU/Genymotion', detected: false, detail: 'sạch' },
         { check: 'GPU renderer ảo', detected: false, detail: 'GPU thật (Adreno/Mali)' },
+        {
+          check: 'Magisk/resetprop (khóa model)',
+          detected: true,
+          detail: 'THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)',
+        },
       ];
     },
     async runWatchSession(index: number) {
@@ -202,6 +207,14 @@ export function createMockBackend(): Backend {
     async saveSettings(next) {
       settings = { ...next };
       return { ...settings };
+    },
+    async getLogs() {
+      const t = new Date().toISOString();
+      return [
+        `${t}  INFO  mpm: Mock backend — log demo (bản Tauri hiện log thật)`,
+        `${t}  INFO  mpm::profile_ops: Reconcile khởi động: không có VM mồ côi`,
+        `${t}  WARN  mpm::adb: (demo) android_id có thể bị GMS ghi đè sau cài TikTok`,
+      ];
     },
   };
 }
