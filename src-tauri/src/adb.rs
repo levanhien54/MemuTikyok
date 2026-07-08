@@ -863,16 +863,12 @@ impl AdbWorker for RealAdbWorker {
                 characteristics == hw.build_characteristics
             };
             if model_ok && fp_ok && characteristics_ok {
-                let _ = self
-                    .adb(idx, &format!("shell rm -f {remote}"))
-                    .await;
+                let _ = self.adb(idx, &format!("shell rm -f {remote}")).await;
                 tracing::info!(idx, model = %hw.model, "Da KHOA model + fingerprint + characteristics qua resetprop (script)");
                 return Ok(true);
             }
         }
-        let _ = self
-            .adb(idx, &format!("shell rm -f {remote}"))
-            .await;
+        let _ = self.adb(idx, &format!("shell rm -f {remote}")).await;
         tracing::warn!(idx, model = %hw.model, "Khoa model/fingerprint/characteristics KHONG verify duoc sau 2 lan");
         Ok(false)
     }
@@ -918,9 +914,7 @@ impl AdbWorker for RealAdbWorker {
             .unwrap_or("video.mp4");
         let remote_name = safe_remote_media_name(name);
         // Tạo thư mục nếu chưa có
-        let _ = self
-            .adb(idx, "shell mkdir -p /sdcard/DCIM/Camera")
-            .await;
+        let _ = self.adb(idx, "shell mkdir -p /sdcard/DCIM/Camera").await;
 
         let remote_path = format!("/sdcard/DCIM/Camera/{remote_name}");
         self.adb_args(idx, &["push", local_path, &remote_path])

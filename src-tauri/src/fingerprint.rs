@@ -149,7 +149,8 @@ const DEVICES: &[DeviceProfile] = &[
         brand: "OnePlus",
         manufacturer: "OnePlus",
         device: "OnePlus8T",
-        fingerprint: "OnePlus/OnePlus8T_EEA/OnePlus8T:11/RP1A.201005.001/2011101425:user/release-keys",
+        fingerprint:
+            "OnePlus/OnePlus8T_EEA/OnePlus8T:11/RP1A.201005.001/2011101425:user/release-keys",
         w: 1080,
         h: 2400,
         dpi: 480,
@@ -407,6 +408,9 @@ mod tests {
                 d.model
             );
         }
-        assert!(DEVICES.len() >= 10, "phai co >=10 device sau khi them Snapdragon");
+        assert!(
+            DEVICES.len() >= 10,
+            "phai co >=10 device sau khi them Snapdragon"
+        );
     }
 }

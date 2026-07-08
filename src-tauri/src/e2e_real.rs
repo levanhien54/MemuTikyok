@@ -474,7 +474,11 @@ async fn a4_provision_fingerprint_inject() {
         }
         if !hw.security_patch.is_empty() {
             let patch = getprop(&mp, idx, "ro.build.version.security_patch");
-            assert_eq!(patch.trim(), hw.security_patch, "security_patch lech profile");
+            assert_eq!(
+                patch.trim(),
+                hw.security_patch,
+                "security_patch lech profile"
+            );
         }
     } else {
         eprintln!(
