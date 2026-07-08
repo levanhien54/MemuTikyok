@@ -10,13 +10,14 @@
 >
 > ✅ **`ro.product.model`** (MuMu random khi boot) và **`ro.build.characteristics=tablet`**
 > nay **KHÓA ĐƯỢC RUNTIME** qua **Magisk resetprop
-> standalone**: MPM trích `libmagisk.so` từ **Magisk APK** (bạn trỏ trong Cài đặt), đẩy vào
+> standalone**: MPM trích `libmagisk.so` từ **Magisk APK** (ưu tiên file bạn trỏ trong Cài đặt,
+> fallback sang `Magisk-v30.7.apk` đi kèm bản đóng gói), đẩy vào
 > mỗi VM (đã có root native), chạy `magisk resetprop` — **không cần base image / cài Magisk
 > hệ thống**. `lock_device_identity` sinh script + VERIFY (đọc lại model, build fingerprint,
 > và `ro.build.characteristics` không còn là `tablet`), đã kiểm chứng thực khóa được cả model **có khoảng trắng**
 > ("Redmi Note 8"). Xem
-> [`BASE_IMAGE_MAGISK_SETUP.md`](BASE_IMAGE_MAGISK_SETUP.md). Để trống ô Magisk APK = tắt
-> (model bị ghi đè, `build_fingerprint` coherent CÓ THỂ lệch model runtime).
+> [`BASE_IMAGE_MAGISK_SETUP.md`](BASE_IMAGE_MAGISK_SETUP.md). Để trống ô Magisk APK = dùng bản đi kèm
+> nếu có; chỉ khi không có APK hợp lệ thì model không khóa được.
 >
 > ✅ **Resolution/DPI runtime** nay áp 2 lớp: `MuMuManager simulation custom_resolution` trước boot
 > và `adb shell wm size/density` sau `wait_boot_completed`; MPM re-assert lại trước khi trả VM cho

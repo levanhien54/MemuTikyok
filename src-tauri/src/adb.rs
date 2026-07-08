@@ -531,6 +531,8 @@ impl AdbWorker for RealAdbWorker {
     }
 
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>> {
+        // MuMu 12 không có `su` — adbd chạy root qua `adb root`; các check dưới chạy trực tiếp.
+        let _ = self.adb(idx, "root").await;
         let mut tells = Vec::new();
 
         let nb = self.prop(idx, "ro.dalvik.vm.native.bridge").await;
@@ -575,7 +577,7 @@ impl AdbWorker for RealAdbWorker {
             // Nếu file bị mount đè (có trong /proc/mounts), tức là ta đã ẩn nó thành công
             let check_cmd = format!("if [ -e {f} ]; then if grep -q ' {f} ' /proc/mounts; then echo 'HIDDEN_MOUNT'; else echo 'EXISTS'; fi; else echo 'NOT_FOUND'; fi");
             let r = self
-                .adb(idx, &format!("shell su -c \"{check_cmd}\""))
+                .adb(idx, &format!("shell {check_cmd}"))
                 .await
                 .unwrap_or_default();
             let s = String::from_utf8_lossy(&r);
@@ -711,7 +713,7 @@ impl AdbWorker for RealAdbWorker {
             &self
                 .adb(
                     idx,
-                    &format!("shell su -c '([ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo yes) || command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo yes && break; done'"),
+                    &format!("shell ([ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo yes) || command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo yes && break; done"),
                 )
                 .await
                 .unwrap_or_default(),
@@ -733,10 +735,12 @@ impl AdbWorker for RealAdbWorker {
     }
 
     async fn harden(&self, idx: u32) -> AppResult<()> {
+        // MuMu 12 không có `su` — root qua adb root; các lệnh dưới chạy trực tiếp.
+        let _ = self.adb(idx, "root").await;
         // Xóa prop camera giả (runtime-settable).
         let _ = self.adb(idx, "shell setprop qemu.sf.fake_camera ''").await;
         // Ẩn thư mục Share của MuMu ($MuMu12Shared) và biến thể cũ.
-        let _ = self.adb(idx, "shell su -c 'for p in /mnt/shared \"/sdcard/\\$MuMu12Shared\" \"/storage/emulated/0/\\$MuMu12Shared\" /sdcard/Android/data/com.microvirt.tools/files; do mountpoint -q \"$p\" && umount \"$p\"; done'").await;
+        let _ = self.adb(idx, "shell for p in /mnt/shared \"/sdcard/\\$MuMu12Shared\" \"/storage/emulated/0/\\$MuMu12Shared\" /sdcard/Android/data/com.microvirt.tools/files; do mountpoint -q \"$p\" && umount \"$p\"; done").await;
 
         // Giả lập pin: rút sạc AC/USB, set mức pin ngẫu nhiên
         let mut rng = crate::humanize::Rng::from_entropy();
@@ -748,21 +752,22 @@ impl AdbWorker for RealAdbWorker {
 
     async fn push_resetprop(&self, idx: u32, local_bin: &str) -> AppResult<bool> {
         let vm = crate::magisk::VM_MAGISK_PATH;
+        // MuMu 12 KHÔNG có binary `su` — adbd chạy root qua `adb root`; chạy lệnh TRỰC TIẾP
+        // (không bọc `su -c`, vốn fail "su: not found" trên build Android 15).
+        let _ = self.adb(idx, "root").await;
         // Best-effort: push hỏng chớp nhoáng (device offline) → Ok(false), KHÔNG Err (nhất quán
         // với chmod/verify tolerant; caller coi đây là no-op chứ không hủy provision).
         if self.adb_args(idx, &["push", local_bin, vm]).await.is_err() {
             tracing::warn!(idx, "Không push được magisk binary vào VM");
             return Ok(false);
         }
-        let _ = self
-            .adb(idx, &format!("shell su -c 'chmod 755 {vm}'"))
-            .await;
+        let _ = self.adb(idx, &format!("shell chmod 755 {vm}")).await;
         // Verify bằng ĐÚNG tiêu chí resolver ở lock_device_identity dùng (`magisk -c` exit 0),
         // để hai chỗ không bao giờ bất đồng về "binary chạy được không".
         let v = self
             .adb(
                 idx,
-                &format!("shell su -c '[ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK'"),
+                &format!("shell [ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK"),
             )
             .await
             .unwrap_or_default();
@@ -778,13 +783,15 @@ impl AdbWorker for RealAdbWorker {
             return Ok(false); // hồ sơ cũ chưa có fingerprint → không có gì để khóa
         }
         let vm = crate::magisk::VM_MAGISK_PATH;
+        // MuMu 12 KHÔNG có `su` — adbd chạy root qua `adb root`; mọi lệnh dưới chạy TRỰC TIẾP.
+        let _ = self.adb(idx, "root").await;
         // Lệnh resetprop: (a) binary magisk MPM đã ĐẨY vào ("<vm> resetprop"), hoặc
         // (b) resetprop standalone (nếu cài Magisk hệ thống). Không có → no-op.
         let rp = {
             let m = self
                 .adb(
                     idx,
-                    &format!("shell su -c '[ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK'"),
+                    &format!("shell [ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK"),
                 )
                 .await
                 .unwrap_or_default();
@@ -794,7 +801,7 @@ impl AdbWorker for RealAdbWorker {
                 let probe = self
                     .adb(
                         idx,
-                        "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x $p ] && echo $p && break; done'",
+                        "shell command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x $p ] && echo $p && break; done",
                     )
                     .await
                     .unwrap_or_default();
@@ -846,7 +853,7 @@ impl AdbWorker for RealAdbWorker {
         // CẢ model LẪN build.fingerprint: chỉ kiểm model có thể báo "khóa" nhầm khi model ăn
         // nhưng fingerprint hỏng → đúng cái INCOHERENCE tính năng này ngăn (finding verify).
         for _ in 0..2 {
-            let _ = self.adb(idx, &format!("shell su -c 'sh {remote}'")).await;
+            let _ = self.adb(idx, &format!("shell sh {remote}")).await;
             let model_ok = self.prop(idx, "ro.product.model").await == hw.model;
             let fp_ok = self.prop(idx, "ro.build.fingerprint").await == hw.build_fingerprint;
             let characteristics = self.prop(idx, "ro.build.characteristics").await;
@@ -857,14 +864,14 @@ impl AdbWorker for RealAdbWorker {
             };
             if model_ok && fp_ok && characteristics_ok {
                 let _ = self
-                    .adb(idx, &format!("shell su -c 'rm -f {remote}'"))
+                    .adb(idx, &format!("shell rm -f {remote}"))
                     .await;
                 tracing::info!(idx, model = %hw.model, "Da KHOA model + fingerprint + characteristics qua resetprop (script)");
                 return Ok(true);
             }
         }
         let _ = self
-            .adb(idx, &format!("shell su -c 'rm -f {remote}'"))
+            .adb(idx, &format!("shell rm -f {remote}"))
             .await;
         tracing::warn!(idx, model = %hw.model, "Khoa model/fingerprint/characteristics KHONG verify duoc sau 2 lan");
         Ok(false)
@@ -902,6 +909,8 @@ impl AdbWorker for RealAdbWorker {
     }
 
     async fn upload_media(&self, idx: u32, local_path: &str) -> AppResult<()> {
+        // MuMu 12 không có `su` — root qua adb root; lệnh dưới chạy trực tiếp.
+        let _ = self.adb(idx, "root").await;
         let path = std::path::Path::new(local_path);
         let name = path
             .file_name()
@@ -910,7 +919,7 @@ impl AdbWorker for RealAdbWorker {
         let remote_name = safe_remote_media_name(name);
         // Tạo thư mục nếu chưa có
         let _ = self
-            .adb(idx, "shell su -c 'mkdir -p /sdcard/DCIM/Camera'")
+            .adb(idx, "shell mkdir -p /sdcard/DCIM/Camera")
             .await;
 
         let remote_path = format!("/sdcard/DCIM/Camera/{remote_name}");

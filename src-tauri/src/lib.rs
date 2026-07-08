@@ -23,7 +23,7 @@ mod snapshot;
 mod state;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use adb::{AdbWorker, MockAdbWorker, RealAdbWorker};
@@ -33,6 +33,9 @@ use geo::{HttpGeolocator, IpGeolocator};
 use model::AppSettings;
 use snapshot::{LocalSnapshotStore, SnapshotStore};
 use state::{AppState, InstanceMeta, ReloadableAdbWorker, ReloadableEmulatorClient};
+use tauri::Manager;
+
+const BUNDLED_MAGISK_APK: &str = "Magisk-v30.7.apk";
 
 struct DisabledSnapshotStore {
     reason: String,
@@ -202,17 +205,38 @@ fn build_store() -> Arc<dyn SnapshotStore> {
     }
 }
 
-/// Trích binary magisk (resetprop) từ Magisk APK cấu hình trong settings, cache vào
-/// thư mục dữ liệu. Trả `None` nếu chưa cấu hình / APK hỏng → model không khóa được.
-/// `pub(crate)` để `save_settings` áp lại NGAY khi người dùng đổi đường dẫn (không đợi restart).
-pub(crate) fn init_magisk_bin(settings: &AppSettings) -> Option<PathBuf> {
+/// Cac vi tri Magisk APK fallback khi user khong tro path rieng.
+fn bundled_magisk_apk_candidates(resource_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = resource_dir {
+        candidates.push(dir.join(BUNDLED_MAGISK_APK));
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(BUNDLED_MAGISK_APK),
+    );
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("appTiktok")
+            .join(BUNDLED_MAGISK_APK),
+    );
+    candidates
+}
+
+/// Trich binary magisk tu Magisk APK cau hinh rieng trong settings.
+fn init_magisk_bin_configured_only(settings: &AppSettings) -> Option<PathBuf> {
     let apk = settings
         .magisk_apk_path
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())?;
     if !std::path::Path::new(apk).is_file() {
-        tracing::warn!(apk, "Magisk APK cấu hình không tồn tại — bỏ qua khóa model");
+        tracing::warn!(
+            apk,
+            "Magisk APK cau hinh khong ton tai - thu Magisk bundled neu co"
+        );
         return None;
     }
     let cache = data_dir()?.join("magisk");
@@ -222,10 +246,47 @@ pub(crate) fn init_magisk_bin(settings: &AppSettings) -> Option<PathBuf> {
             Some(p)
         }
         None => {
-            tracing::warn!("Không trích được resetprop từ APK — bỏ qua khóa model");
+            tracing::warn!(
+                "Khong trich duoc resetprop tu APK cau hinh - thu Magisk bundled neu co"
+            );
             None
         }
     }
+}
+
+/// Trich binary magisk (resetprop) tu APK nguoi dung chon hoac APK di kem bundle.
+pub(crate) fn init_magisk_bin(settings: &AppSettings) -> Option<PathBuf> {
+    init_magisk_bin_with_resource_dir(settings, None)
+}
+
+/// Bien the co resource_dir de ban dong goi dung APK di kem ma khong can user tro path.
+pub(crate) fn init_magisk_bin_with_resource_dir(
+    settings: &AppSettings,
+    resource_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(bin) = init_magisk_bin_configured_only(settings) {
+        return Some(bin);
+    }
+
+    let cache = data_dir()?.join("magisk");
+    for apk in bundled_magisk_apk_candidates(resource_dir) {
+        if !apk.is_file() {
+            tracing::debug!(apk = %apk.display(), "Khong tim thay Magisk APK candidate");
+            continue;
+        }
+        match crate::magisk::ensure_binary(&apk.to_string_lossy(), &cache) {
+            Some(p) => {
+                tracing::info!(apk = %apk.display(), path = %p.display(), "San sang resetprop tu Magisk bundled");
+                return Some(p);
+            }
+            None => {
+                tracing::warn!(apk = %apk.display(), "Khong trich duoc resetprop tu APK bundled");
+            }
+        }
+    }
+
+    tracing::warn!("Khong co Magisk APK hop le - bo qua khoa model");
+    None
 }
 
 /// Khởi tạo SQLite DB + lấy InstanceMeta nếu có.
@@ -292,6 +353,7 @@ pub fn run() {
     let (db, metadata) = init_db(enc_key);
     // Trích binary magisk TRƯỚC khi move `settings` vào AppState.
     let magisk_bin = init_magisk_bin(&settings);
+    let setup_settings = settings.clone();
     let app_state: state::SharedState = Arc::new(AppState::new_reloadable(
         emulator,
         emulator_reload,
@@ -304,6 +366,7 @@ pub fn run() {
         metadata,
     ));
     app_state.set_magisk_bin(magisk_bin);
+    let setup_state = app_state.clone();
     let reconcile_state = app_state.clone();
 
     // KHÔNG dùng tauri-plugin-log: logcap (tracing-subscriber) đã sở hữu global logger
@@ -313,7 +376,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
         .manage(log_buffer)
-        .setup(move |_app| {
+        .setup(move |app| {
+            let resource_dir = app.path().resource_dir().ok();
+            setup_state.set_magisk_bin(init_magisk_bin_with_resource_dir(
+                &setup_settings,
+                resource_dir.as_deref(),
+            ));
             // RECONCILE khởi động: dọn VM mồ côi từ phiên trước (crash/tắt đột ngột).
             tauri::async_runtime::spawn(async move {
                 let n = profile_ops::reconcile_startup(&reconcile_state).await;

@@ -4,8 +4,15 @@
 > **khóa `ro.product.model` + đồng bộ `ro.build.fingerprint`** mỗi lần Chạy — chống MuMu
 > random model khi boot.
 >
-> ✅ **Đã hiện thực (2026-07-06):** MPM tự làm HẾT, chỉ cần bạn trỏ **Magisk APK** trong
-> Cài đặt. KHÔNG cần MagiskOnEmu / Magisk Delta / sửa base image thủ công nữa.
+> ✅ **Đã hiện thực (2026-07-08):** MPM tự làm HẾT. Bản đóng gói có thể kèm
+> `Magisk-v30.7.apk`; người dùng vẫn có thể trỏ **Magisk APK** khác trong Cài đặt.
+> KHÔNG cần MagiskOnEmu / Magisk Delta / sửa base image thủ công nữa.
+>
+> ⚠️ **QUAN TRỌNG (2026-07-08, kiểm chứng thật):** MuMu **Android 15** KHÔNG có binary `su`
+> (`su: inaccessible or not found`); root chỉ qua `adb root` (adbd chạy uid 0). Vì vậy MPM chạy
+> resetprop/harden/scan bằng **`adb root` + lệnh TRỰC TIẾP**, KHÔNG bọc `su -c` (bọc su -c sẽ fail
+> âm thầm → model giữ spoof mặc định MuMu `SM-G9980`/`kona`, fingerprint KHÔNG được áp). Verified:
+> `a12_khoa_model_co_khoang_trang` + `a4_provision_fingerprint_inject` PASS trên MuMu 15.
 
 ## Cách hoạt động (đã kiểm chứng trên MuMu thật)
 
@@ -23,14 +30,16 @@ Luồng tự động trong `provision` (sau `wait_boot_completed`):
 3. `lock_device_identity` **sinh script** đặt bộ prop nhận diện thiết bị rồi chạy `sh <file>` (xem "Vì sao script").
 4. **VERIFY:** đọc lại `ro.product.model` = model đã khóa → trả `true/false` (log ở LogsView).
 
-## Cấu hình (việc DUY NHẤT bạn cần làm)
+## Cấu hình
 
-1. Tải **Magisk APK chính thống** ([github.com/topjohnwu/Magisk/releases](https://github.com/topjohnwu/Magisk/releases)
+1. Mặc định bản đóng gói lấy `Magisk-v30.7.apk` từ Tauri resource và tự trích
+   `lib/x86_64/libmagisk.so`.
+2. Nếu muốn thay APK, vào MPM → **Cài đặt** → **"Magisk APK (khóa model)"** → bấm nút chọn file
+   `.apk` hoặc nhập đường dẫn thủ công.
+3. Để trống ô này = dùng Magisk đi kèm nếu có; nếu bản chạy không có resource Magisk thì khóa
+   model sẽ bị tắt.
+4. Chỉ dùng **Magisk APK chính thống** ([github.com/topjohnwu/Magisk/releases](https://github.com/topjohnwu/Magisk/releases)
    — đã kiểm chứng v30.7). KHÔNG dùng bản repack lạ.
-2. Trong MPM → **Cài đặt** → **"Magisk APK (khóa model)"** → trỏ tới file `.apk`
-   (vd `D:\MemuTiktok\appTiktok\Magisk-v30.7.apk`).
-3. Xong. Mỗi lần Chạy profile, MPM tự đẩy resetprop + khóa model.
-   - Để trống ô này = **tắt** khóa model (model sẽ bị MuMu ghi đè).
 
 ## Vì sao cần resetprop (không dùng được cách khác)
 - `ro.product.model` là prop **read-only** — sau boot `setprop` bị `property_service` chặn.
@@ -59,7 +68,7 @@ ro.build.fingerprint    <build_fingerprint>
 ## Xác minh
 1. **Scan "Kiểm tra dấu vết ảo"** (menu ⋮ trên VM đang chạy) → mục
    **"Magisk/resetprop (khóa model)"** phải **KHÔNG đỏ** (sạch = có resetprop). Đây là cách
-   kiểm nhanh nhất. Đỏ = chưa trỏ Magisk APK, hoặc APK hỏng/không có `lib/x86_64/libmagisk.so`.
+   kiểm nhanh nhất. Đỏ = thiếu APK bundled, chưa trỏ Magisk APK, hoặc APK hỏng/không có `lib/x86_64/libmagisk.so`.
 2. `MuMuManager.exe adb -v <idx> -c "shell getprop ro.product.model"` = model của profile (không phải MuMu random).
 3. `getprop ro.build.fingerprint` = fingerprint thật khớp model.
 4. **Test tự động:** `cargo test --lib a12_khoa_model_co_khoang_trang -- --ignored --nocapture`

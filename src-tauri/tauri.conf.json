@@ -32,7 +32,10 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "resources/Magisk-v30.7.apk": "Magisk-v30.7.apk"
+    }
   },
   "plugins": {}
 }

@@ -119,7 +119,9 @@ hoặc schema generator tương đương để tránh lệch schema.
 - `pollIntervalMs` áp dụng ngay trong frontend: `useProfileStore` khởi tạo lại interval khi settings đổi.
 - `maxConcurrency` áp dụng ngay trong backend: `save_settings` cập nhật `CommandQueue`; nếu giảm thấp hơn số tác vụ đang chạy thì tác vụ hiện tại chạy xong, tác vụ mới chờ theo limit mới.
 - `tiktokApkPath` được đọc ở mỗi lần `run_profile`, nên có hiệu lực ở lần chạy profile kế tiếp.
-- `magiskApkPath` được trích lại và set vào `AppState` ngay khi lưu settings.
+- `magiskApkPath` được trích lại và set vào `AppState` ngay khi lưu settings. Nếu để trống,
+  backend fallback sang `Magisk-v30.7.apk` đi kèm Tauri resource (hoặc bản dev trong
+  `src-tauri/resources`) nếu có.
 - `mumuPath` hiện chỉ dùng lúc khởi động để dựng `EmulatorClient`/`AdbWorker`; đổi đường dẫn được persist nhưng cần mở lại app để adapter production chuyển sang binary mới. Muốn áp dụng nóng cần refactor state sang adapter có thể reload.
 
 ## MuMu/ADB
@@ -130,7 +132,7 @@ hoặc schema generator tương đương để tránh lệch schema.
   `imei`, `microvirt_vm_model`, `microvirt_vm_brand`, `microvirt_vm_manufacturer`,
   `mac_address`, `enable_su`, `custom_resolution`.
 - Runtime fingerprint sau boot dùng ADB: `wm size/density`, `settings put secure android_id`,
-  và `resetprop` cho `ro.product.*`/`ro.build.fingerprint` nếu có Magisk APK.
+  và `resetprop` cho `ro.product.*`/`ro.build.fingerprint` nếu có Magisk APK cấu hình hoặc bundled.
 - `android_id` áp qua adb, không coi là khóa MuMuManager đáng tin cậy; Android 8+ SSAID/GMS
   vẫn có thể cấp giá trị app-scoped khác sau khi TikTok chạy.
 - `AdbWorker` production dùng `MuMuManager.exe adb -v <idx> -c "<adb command>"`.

@@ -4,7 +4,7 @@
 //! biên IPC chỉ phơi bày vòng đời PROFILE + tiện ích trên VM đang chạy + cài đặt.
 //! Lõi nghiệp vụ profile nằm ở `crate::profile_ops` (test được trực tiếp, kể cả E2E thật).
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::error::AppResult;
 use crate::model::{
@@ -138,6 +138,7 @@ fn normalize_settings(settings: &mut AppSettings) {
 #[tauri::command]
 pub async fn save_settings(
     mut settings: AppSettings,
+    app: AppHandle,
     state: State<'_, SharedState>,
 ) -> AppResult<AppSettings> {
     // Ràng buộc giá trị an toàn: poll ≥ 250ms (interval(0) panic), concurrency ≥ 1.
@@ -163,9 +164,13 @@ pub async fn save_settings(
     // Lưu ra đĩa để giữ cấu hình (vd đường dẫn MuMu bản Pro) qua các lần chạy.
     crate::persist_settings(&settings);
     // Áp NGAY thay đổi Magisk APK (trích lại binary + set) — nếu không, đổi/trỏ đường dẫn
-    // trong Cài đặt sẽ KHÔNG khóa được model cho tới khi khởi động lại app. Trỏ rỗng → None
-    // (tắt khóa model). Cache theo mtime nên gọi lại mỗi lần lưu là rẻ khi APK không đổi.
-    state.set_magisk_bin(crate::init_magisk_bin(&settings));
+    // trong Cài đặt sẽ KHÔNG khóa được model cho tới khi khởi động lại app. Trỏ rỗng →
+    // dùng Magisk bundled nếu có. Cache theo mtime nên gọi lại mỗi lần lưu là rẻ khi APK không đổi.
+    let resource_dir = app.path().resource_dir().ok();
+    state.set_magisk_bin(crate::init_magisk_bin_with_resource_dir(
+        &settings,
+        resource_dir.as_deref(),
+    ));
     if mumu_path_changed {
         let emulator = crate::build_emulator(&settings);
         let adb = crate::build_adb(&settings);
