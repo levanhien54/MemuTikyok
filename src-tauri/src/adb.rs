@@ -80,6 +80,20 @@ fn sh_escape(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
+/// Trích số version từ output `dumpsys ... | grep versionName`. MuMuManager chèn nhiễu
+/// ("already connected to 127.0.0.1:...", "daemon started") vào stdout NGOÀI pipe grep của
+/// device → nếu giữ cả chuỗi, snapshot lưu version BẨN và so sánh restore lệch dù version
+/// thực giống nhau (bug thật đã gặp). Có "versionName=" → lấy token đầu sau nó; không có
+/// (vd giá trị mock/"unknown") → giữ nguyên đã trim.
+pub(crate) fn normalize_apk_version(raw: &str) -> String {
+    raw.lines()
+        .filter_map(|l| l.split("versionName=").nth(1))
+        .map(|v| v.split_whitespace().next().unwrap_or("").trim())
+        .find(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| raw.trim().to_string())
+}
+
 fn build_lock_script(rp: &str, hw: &HardwareProfile) -> String {
     let mut script = String::from("#!/system/bin/sh\n");
 
@@ -379,7 +393,7 @@ impl AdbWorker for RealAdbWorker {
                 &format!("shell dumpsys package {pkg} | grep versionName"),
             )
             .await?;
-        let version = String::from_utf8_lossy(&out).trim().to_string();
+        let version = normalize_apk_version(&String::from_utf8_lossy(&out));
         Ok(if version.is_empty() {
             "unknown".into()
         } else {
@@ -1195,6 +1209,23 @@ mod tests {
             security_patch: "2021-05-01".into(),
             build_characteristics: "".into(),
         }
+    }
+
+    #[test]
+    fn normalize_apk_version_bo_nhieu_mumumanager() {
+        // Nhiễu MuMuManager ("already connected...") KHÔNG được lọt vào version (bug thật đã gặp).
+        assert_eq!(normalize_apk_version("    versionName=40.0.0"), "40.0.0");
+        assert_eq!(
+            normalize_apk_version("already connected to 127.0.0.1:21513 versionName=40.0.0"),
+            "40.0.0"
+        );
+        assert_eq!(
+            normalize_apk_version("already connected to 127.0.0.1:21513\n    versionName=40.0.0"),
+            "40.0.0"
+        );
+        // Không có "versionName=" (vd mock) → giữ nguyên để so sánh mock vẫn phát hiện lệch.
+        assert_eq!(normalize_apk_version("mock-1.0"), "mock-1.0");
+        assert_eq!(normalize_apk_version(""), "");
     }
 
     #[test]

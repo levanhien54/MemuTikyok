@@ -312,7 +312,11 @@ async fn provision_prepare(
                 .filter(|v| !v.is_empty() && *v != "unknown")
             {
                 let actual = state.adb.apk_version(index, TIKTOK_PKG).await?;
-                if actual.trim() != expected {
+                // Chuẩn hóa CẢ HAI phía: record snapshot cũ có thể lưu version dính nhiễu
+                // MuMuManager ("already connected... versionName=X") → so version THỰC, không chuỗi thô.
+                if crate::adb::normalize_apk_version(&actual)
+                    != crate::adb::normalize_apk_version(expected)
+                {
                     return Err(AppError::CommandFailed(format!(
                         "APK TikTok lệch phiên bản: snapshot={expected}, vm={actual}. Từ chối restore để tránh hỏng dữ liệu app"
                     )));
