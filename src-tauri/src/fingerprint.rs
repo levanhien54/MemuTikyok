@@ -120,6 +120,100 @@ const DEVICES: &[DeviceProfile] = &[
         security_patch: "2021-05-01",
         build_characteristics: "",
     },
+    // ── Snapdragon (Adreno) — build.prop THẬT, fetch verbatim + verify chéo nguồn (2026-07-08).
+    //    Bổ sung để đa dạng hơn + khớp hướng device hiện đại. tac/security_patch rỗng = chưa
+    //    kiểm được (không bịa) → code bỏ qua/fallback. soc_hardware "qcom" = fact phổ quát cho
+    //    Qualcomm SoC (verify-agent xác nhận), Pixel để rỗng (Google dùng convention khác).
+    // Samsung Galaxy S20 5G Snapdragon (SM-G981N Korea, x1q, SD865/kona, Adreno 650).
+    // src: gitlab Android-Dumps/samsung/x1q build.prop; cross: sfirmware.com/samsung-sm-g981n.
+    DeviceProfile {
+        model: "SM-G981N",
+        brand: "samsung",
+        manufacturer: "samsung",
+        device: "x1q",
+        fingerprint: "samsung/x1qksx/x1q:12/SP1A.210812.016/G981NKSU1GVE4:user/release-keys",
+        w: 1080,
+        h: 2400,
+        dpi: 480,
+        tac: "",
+        soc_hardware: "qcom",
+        board_platform: "kona",
+        gpu_egl: "adreno",
+        security_patch: "2022-05-01",
+        build_characteristics: "",
+    },
+    // OnePlus 8T (KB2003 EEA, codename OnePlus8T/kebab, SD865/kona, Adreno 650).
+    // src: dumps.tadiphone.dev/oneplus8t + LineageOS/AICP device_oneplus_kebab .mk (verbatim).
+    DeviceProfile {
+        model: "KB2003",
+        brand: "OnePlus",
+        manufacturer: "OnePlus",
+        device: "OnePlus8T",
+        fingerprint: "OnePlus/OnePlus8T_EEA/OnePlus8T:11/RP1A.201005.001/2011101425:user/release-keys",
+        w: 1080,
+        h: 2400,
+        dpi: 480,
+        tac: "",
+        soc_hardware: "qcom",
+        board_platform: "kona",
+        gpu_egl: "adreno",
+        security_patch: "",
+        build_characteristics: "",
+    },
+    // Xiaomi POCO F2 Pro (lmi global, SD865/kona, Adreno 650).
+    // src: dumps.tadiphone/xiaomi lmi build.prop (verbatim).
+    DeviceProfile {
+        model: "POCO F2 Pro",
+        brand: "POCO",
+        manufacturer: "Xiaomi",
+        device: "lmi",
+        fingerprint: "POCO/lmi_global/lmi:11/RKQ1.200826.002/V12.5.1.0.RJKMIXM:user/release-keys",
+        w: 1080,
+        h: 2400,
+        dpi: 440,
+        tac: "",
+        soc_hardware: "qcom",
+        board_platform: "kona",
+        gpu_egl: "adreno",
+        security_patch: "2021-06-01",
+        build_characteristics: "",
+    },
+    // Google Pixel 5 (redfin, SD765G/lito, Adreno 620).
+    // src: Android-Dumps google/redfin build.prop (verbatim).
+    DeviceProfile {
+        model: "Pixel 5",
+        brand: "google",
+        manufacturer: "Google",
+        device: "redfin",
+        fingerprint: "google/redfin/redfin:13/TQ3A.230705.001/10216780:user/release-keys",
+        w: 1080,
+        h: 2340,
+        dpi: 440,
+        tac: "",
+        soc_hardware: "",
+        board_platform: "lito",
+        gpu_egl: "adreno",
+        security_patch: "2023-07-05",
+        build_characteristics: "",
+    },
+    // Samsung Galaxy S21 5G Snapdragon (SM-G991U US, o1q, SD888/lahaina, Adreno 660).
+    // src: Android-Dumps samsung/o1q build.prop (verbatim).
+    DeviceProfile {
+        model: "SM-G991U",
+        brand: "samsung",
+        manufacturer: "samsung",
+        device: "o1q",
+        fingerprint: "samsung/o1qsqw/o1q:12/SP1A.210812.016/G991USQS4BUKK:user/release-keys",
+        w: 1080,
+        h: 2400,
+        dpi: 480,
+        tac: "",
+        soc_hardware: "qcom",
+        board_platform: "lahaina",
+        gpu_egl: "adreno",
+        security_patch: "",
+        build_characteristics: "",
+    },
 ];
 
 fn rand_bytes(n: usize) -> AppResult<Vec<u8>> {
@@ -289,5 +383,30 @@ mod tests {
         let b = generate().unwrap();
         assert_ne!(a.imei, b.imei, "IMEI phải duy nhất");
         assert_ne!(a.android_id, b.android_id);
+    }
+
+    #[test]
+    fn tat_ca_device_mumu_safe_va_egl_hop_le() {
+        for d in DEVICES {
+            assert!(d.w <= 1080, "{}: rong {} vuot MuMu-safe 1080", d.model, d.w);
+            assert!(
+                (120..=480).contains(&d.dpi),
+                "{}: dpi {} ngoai [120,480]",
+                d.model,
+                d.dpi
+            );
+            assert!(
+                d.gpu_egl.is_empty() || d.gpu_egl == "mali" || d.gpu_egl == "adreno",
+                "{}: gpu_egl '{}' khong hop le",
+                d.model,
+                d.gpu_egl
+            );
+            assert!(
+                !d.model.is_empty() && !d.fingerprint.is_empty() && !d.device.is_empty(),
+                "{}: thieu truong bat buoc",
+                d.model
+            );
+        }
+        assert!(DEVICES.len() >= 10, "phai co >=10 device sau khi them Snapdragon");
     }
 }

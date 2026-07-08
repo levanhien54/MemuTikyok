@@ -1335,6 +1335,53 @@ async fn a16_sensor_entropy_baseline() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// DUMP prop BASE thật của MuMu (TẮT resetprop lock để không bị ta ghi đè) → tham chiếu
+/// dựng device Snapdragon coherent. Không assert — in `MUMU_BASE_PROPS`. VmGuard tự dọn VM.
+#[tokio::test]
+#[ignore]
+async fn dump_mumu_base_props() {
+    if !mumu_available() {
+        eprintln!("[skip] Khong co MuMu");
+        return;
+    }
+    let (state, dir) = make_state("dump").await;
+    state.set_magisk_bin(None); // thấy prop base MuMu, không khóa
+    let mp = emulator_path();
+    let guard = VmGuard::new(mp.clone());
+    let before = index_set(&state).await;
+
+    let idx = orchestrator::provision(&state, "acc_dump", &hw(), None)
+        .await
+        .expect("provision dump");
+    guard.track(idx);
+    assert_new_index(&before, idx);
+
+    for name in [
+        "ro.product.model",
+        "ro.product.brand",
+        "ro.product.manufacturer",
+        "ro.product.device",
+        "ro.product.name",
+        "ro.build.fingerprint",
+        "ro.hardware",
+        "ro.board.platform",
+        "ro.hardware.egl",
+        "ro.build.version.security_patch",
+        "ro.build.version.release",
+        "ro.build.characteristics",
+        "ro.product.cpu.abi",
+        "ro.build.tags",
+        "ro.build.type",
+    ] {
+        println!("MUMU_BASE_PROPS {name}={:?}", getprop(&mp, idx, name));
+    }
+
+    let _ = state.emulator.stop(idx).await;
+    let _ = state.emulator.remove(idx).await;
+    guard.untrack(idx);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A.12 — Vòng đời PROFILE trên MuMu THẬT qua `profile_ops` (đúng code production
 /// của run_profile/stop_profile): create (KHÔNG VM) → run (provision + CÀI TIKTOK +
 /// đăng ký running) → stop (backup + hủy VM; profile bền). Đóng khoảng trống #4 cho
