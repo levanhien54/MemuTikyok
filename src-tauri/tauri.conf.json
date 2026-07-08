@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MEmu Play Manager",
+  "productName": "MuMu Play Manager",
   "version": "0.1.0",
   "identifier": "com.mpm.manager",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MEmu Play Manager",
+        "title": "MuMu Play Manager",
         "width": 1180,
         "height": 760,
         "minWidth": 900,
@@ -32,7 +32,10 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "resources/Magisk-v30.7.apk": "Magisk-v30.7.apk"
+    }
   },
   "plugins": {}
 }

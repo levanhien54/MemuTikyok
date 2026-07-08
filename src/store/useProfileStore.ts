@@ -1,9 +1,17 @@
 import { create } from 'zustand';
-import type { AccountProfile, ProfileView } from '@/types/instance';
+import type { AccountProfile, ProfileView, RunProfileResult } from '@/types/instance';
 import { getBackend } from '@/lib';
+import { useSettingsStore } from '@/store/useSettingsStore';
 import { toast } from '@/store/useToastStore';
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error';
+const DEFAULT_POLL_INTERVAL_MS = 5000;
+let refreshRequestId = 0;
+
+function profilePollIntervalMs(): number {
+  const ms = useSettingsStore.getState().settings?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  return Number.isFinite(ms) ? Math.max(250, ms) : DEFAULT_POLL_INTERVAL_MS;
+}
 
 interface ProfileState {
   profiles: ProfileView[];
@@ -22,7 +30,7 @@ interface ProfileState {
     note: string,
     country: string | null,
   ) => Promise<void>;
-  run: (username: string) => Promise<number>;
+  run: (username: string) => Promise<RunProfileResult>;
   stop: (username: string) => Promise<void>;
   remove: (username: string) => Promise<void>;
 }
@@ -48,24 +56,43 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       (index, message) => toast.error(`Phiên VM #${index} lỗi: ${message}`),
     );
     // Poll định kỳ: giữ badge "đang chạy VM #N" đồng bộ nếu VM bị hủy ngoài luồng app.
-    const poll = setInterval(() => void get().refresh(), 5000);
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const restartPoll = () => {
+      if (poll) clearInterval(poll);
+      poll = setInterval(() => void get().refresh(), profilePollIntervalMs());
+    };
+    restartPoll();
+    const unsubSettings = useSettingsStore.subscribe((state, prevState) => {
+      if (state.settings?.pollIntervalMs !== prevState.settings?.pollIntervalMs) restartPoll();
+    });
     // Refresh khi cửa sổ được focus lại (người dùng quay lại app).
     const onFocus = () => void get().refresh();
     window.addEventListener('focus', onFocus);
     return () => {
       unsub();
-      clearInterval(poll);
+      unsubSettings();
+      if (poll) clearInterval(poll);
       window.removeEventListener('focus', onFocus);
     };
   },
 
   async refresh() {
+    const requestId = ++refreshRequestId;
+    const hadProfiles = get().profiles.length > 0;
     try {
-      set({ loadState: get().profiles.length ? 'ready' : 'loading' });
+      set({ loadState: hadProfiles ? 'ready' : 'loading' });
       const profiles = await getBackend().listProfiles();
+      if (requestId !== refreshRequestId) return;
       set({ profiles, loadState: 'ready', error: null });
     } catch (e) {
-      set({ loadState: 'error', error: e instanceof Error ? e.message : String(e) });
+      if (requestId !== refreshRequestId) return;
+      const message = e instanceof Error ? e.message : String(e);
+      if (hadProfiles) {
+        set({ loadState: 'ready', error: message });
+        toast.error(`Cập nhật danh sách lỗi: ${message}`);
+      } else {
+        set({ loadState: 'error', error: message });
+      }
     }
   },
 
@@ -82,9 +109,9 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
     await get().refresh();
   },
   async run(username) {
-    const vm = await getBackend().runProfile(username);
+    const result = await getBackend().runProfile(username);
     await get().refresh();
-    return vm;
+    return result;
   },
   async stop(username) {
     await getBackend().stopProfile(username);

@@ -7,6 +7,7 @@ import type {
   EmulatorTell,
   SessionReport,
   ProfileView,
+  RunProfileResult,
 } from '@/types/instance';
 
 /**
@@ -25,7 +26,7 @@ export function createTauriBackend(): Backend {
       return invoke<void>('update_profile', { username, account, note, country });
     },
     runProfile(username) {
-      return invoke<number>('run_profile', { username });
+      return invoke<RunProfileResult>('run_profile', { username });
     },
     stopProfile(username) {
       return invoke<SnapshotRecord | null>('stop_profile', { username });
@@ -38,6 +39,9 @@ export function createTauriBackend(): Backend {
     },
     runWatchSession(index) {
       return invoke<void>('run_watch_session', { index });
+    },
+    uploadVideoToVm(index, localPath) {
+      return invoke<void>('upload_video_to_vm', { index, localPath });
     },
     subscribeAutomation(onDone, onError) {
       const pDone = listen<SessionReport>('automation:done', (e) => onDone(e.payload));

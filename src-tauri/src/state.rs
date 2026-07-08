@@ -1,23 +1,27 @@
-//! State dùng chung của ứng dụng (§8.3 SRS). Giữ adapter memuc, hàng đợi lệnh,
+//! State dùng chung của ứng dụng (§8.3 SRS). Giữ adapter emulator, hàng đợi lệnh,
 //! registry instance, settings, metadata (persist SQLite) và geolocator.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Mutex;
 
 use crate::adb::AdbWorker;
 use crate::db::Db;
+use crate::emulator::EmulatorClient;
 use crate::geo::IpGeolocator;
-use crate::memuc::MemucClient;
-use crate::model::{AccountProfile, AppSettings, HardwareProfile, Profile};
+use crate::model::{
+    AccountProfile, AppSettings, EmulatorTell, FingerprintLockStatus, HardwareProfile, Instance,
+    Profile, ProvisionHealth, SnapshotMeta,
+};
 use crate::queue::CommandQueue;
 use crate::snapshot::SnapshotStore;
 
 /// vm_index "đặt chỗ": một lần `run` đang provision (chưa có VM thật). Chiếm slot
 /// trong cổng tối đa để chống đua, nhưng KHÔNG hiển thị là đang chạy. `u32::MAX` là
-/// index bất khả (memuc không bao giờ cấp) nên an toàn làm cờ.
+/// index bất khả (emulator không bao giờ cấp) nên an toàn làm cờ.
 pub const RESERVED_VM: u32 = u32::MAX;
 
 /// Kết quả đặt chỗ slot chạy (nguyên tử) — xem `AppState::reserve_run_slot`.
@@ -26,13 +30,22 @@ pub enum RunSlot {
     AlreadyRunning(u32),
     /// Một lần `run` khác đang provision profile này — chưa xong.
     Pending,
+    /// Profile đang backup+dừng; VM vẫn chiếm slot cho tới khi remove xong.
+    Stopping,
     /// Đã đạt tối đa số VM chạy đồng thời.
     AtCapacity,
     /// Đã đặt chỗ thành công — caller được phép provision.
     Reserved,
 }
 
-/// Metadata do MPM tự quản cho từng VM (không thuộc memuc). Persist vào SQLite.
+pub enum TeardownSlot {
+    Ready(u32),
+    NotRunning,
+    Pending,
+    AlreadyStopping,
+}
+
+/// Metadata do MPM tự quản cho từng VM (không thuộc emulator). Persist vào SQLite.
 #[derive(Debug, Clone, Default)]
 pub struct InstanceMeta {
     pub account: Option<AccountProfile>,
@@ -43,10 +56,201 @@ pub struct InstanceMeta {
     pub hardware: Option<HardwareProfile>,
 }
 
+pub struct ReloadableEmulatorClient {
+    inner: RwLock<Arc<dyn EmulatorClient>>,
+}
+
+impl ReloadableEmulatorClient {
+    pub fn new(inner: Arc<dyn EmulatorClient>) -> Self {
+        Self {
+            inner: RwLock::new(inner),
+        }
+    }
+
+    fn current(&self) -> Arc<dyn EmulatorClient> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn replace(&self, inner: Arc<dyn EmulatorClient>) {
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = inner;
+    }
+}
+
+#[async_trait::async_trait]
+impl EmulatorClient for ReloadableEmulatorClient {
+    async fn list_instances(&self) -> crate::error::AppResult<Vec<Instance>> {
+        let inner = self.current();
+        inner.list_instances().await
+    }
+
+    async fn start(&self, index: u32) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.start(index).await
+    }
+
+    async fn stop(&self, index: u32) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.stop(index).await
+    }
+
+    async fn create(&self) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.create().await
+    }
+
+    async fn remove(&self, index: u32) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.remove(index).await
+    }
+
+    async fn set_config(&self, index: u32, key: &str, value: &str) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.set_config(index, key, value).await
+    }
+
+    async fn set_resolution(
+        &self,
+        index: u32,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    ) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.set_resolution(index, width, height, dpi).await
+    }
+}
+
+pub struct ReloadableAdbWorker {
+    inner: RwLock<Arc<dyn AdbWorker>>,
+}
+
+impl ReloadableAdbWorker {
+    pub fn new(inner: Arc<dyn AdbWorker>) -> Self {
+        Self {
+            inner: RwLock::new(inner),
+        }
+    }
+
+    fn current(&self) -> Arc<dyn AdbWorker> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    pub fn replace(&self, inner: Arc<dyn AdbWorker>) {
+        *self.inner.write().unwrap_or_else(|e| e.into_inner()) = inner;
+    }
+}
+
+#[async_trait::async_trait]
+impl AdbWorker for ReloadableAdbWorker {
+    async fn backup(
+        &self,
+        idx: u32,
+        pkg: &str,
+        out: &Path,
+    ) -> crate::error::AppResult<SnapshotMeta> {
+        let inner = self.current();
+        inner.backup(idx, pkg, out).await
+    }
+
+    async fn restore(&self, idx: u32, pkg: &str, archive: &Path) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.restore(idx, pkg, archive).await
+    }
+
+    async fn apk_version(&self, idx: u32, pkg: &str) -> crate::error::AppResult<String> {
+        let inner = self.current();
+        inner.apk_version(idx, pkg).await
+    }
+
+    async fn apply_android_id(&self, idx: u32, android_id: &str) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.apply_android_id(idx, android_id).await
+    }
+
+    async fn apply_display_profile(
+        &self,
+        idx: u32,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    ) -> crate::error::AppResult<bool> {
+        let inner = self.current();
+        inner.apply_display_profile(idx, width, height, dpi).await
+    }
+
+    async fn wait_boot_completed(&self, idx: u32) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.wait_boot_completed(idx).await
+    }
+
+    async fn start_app(&self, idx: u32, pkg: &str) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.start_app(idx, pkg).await
+    }
+
+    async fn install_apk(&self, idx: u32, apk_path: &str) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.install_apk(idx, apk_path).await
+    }
+
+    async fn disable_app(&self, idx: u32, pkg: &str) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.disable_app(idx, pkg).await
+    }
+
+    async fn scan_emulator_tells(&self, idx: u32) -> crate::error::AppResult<Vec<EmulatorTell>> {
+        let inner = self.current();
+        inner.scan_emulator_tells(idx).await
+    }
+
+    async fn harden(&self, idx: u32) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.harden(idx).await
+    }
+
+    async fn push_resetprop(&self, idx: u32, local_bin: &str) -> crate::error::AppResult<bool> {
+        let inner = self.current();
+        inner.push_resetprop(idx, local_bin).await
+    }
+
+    async fn lock_device_identity(
+        &self,
+        idx: u32,
+        hw: &HardwareProfile,
+    ) -> crate::error::AppResult<bool> {
+        let inner = self.current();
+        inner.lock_device_identity(idx, hw).await
+    }
+
+    async fn human_tap(&self, idx: u32, x: i32, y: i32) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.human_tap(idx, x, y).await
+    }
+
+    async fn human_swipe(
+        &self,
+        idx: u32,
+        x0: i32,
+        y0: i32,
+        x1: i32,
+        y1: i32,
+    ) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.human_swipe(idx, x0, y0, x1, y1).await
+    }
+
+    async fn upload_media(&self, idx: u32, local_path: &str) -> crate::error::AppResult<()> {
+        let inner = self.current();
+        inner.upload_media(idx, local_path).await
+    }
+}
+
 pub struct AppState {
-    pub memuc: Arc<dyn MemucClient>,
+    pub emulator: Arc<dyn EmulatorClient>,
+    emulator_reload: Option<Arc<ReloadableEmulatorClient>>,
     pub geo: Arc<dyn IpGeolocator>,
     pub adb: Arc<dyn AdbWorker>,
+    adb_reload: Option<Arc<ReloadableAdbWorker>>,
     pub store: Arc<dyn SnapshotStore>,
     pub queue: CommandQueue,
     pub settings: Mutex<AppSettings>,
@@ -65,12 +269,18 @@ pub struct AppState {
     /// Ánh xạ profile ĐANG CHẠY → vm_index (bộ nhớ, không persist). Dùng **std Mutex**
     /// (không giữ qua await ở đâu cả) để RAII guard nhả chỗ được TRONG Drop (đồng bộ).
     pub running_profiles: std::sync::Mutex<HashMap<String, u32>>,
+    pub stopping_profiles: std::sync::Mutex<HashSet<String>>,
+    /// Binary magisk (resetprop) đã trích từ Magisk APK — set lúc khởi động nếu
+    /// `settings.magisk_apk_path` có. None = không khóa được model (thiếu Magisk APK).
+    pub magisk_bin: std::sync::Mutex<Option<std::path::PathBuf>>,
+    pub fingerprint_locks: Mutex<HashMap<u32, FingerprintLockStatus>>,
+    pub fixable_tells: Mutex<HashMap<u32, Vec<String>>>,
 }
 
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        memuc: Arc<dyn MemucClient>,
+        emulator: Arc<dyn EmulatorClient>,
         geo: Arc<dyn IpGeolocator>,
         adb: Arc<dyn AdbWorker>,
         store: Arc<dyn SnapshotStore>,
@@ -88,9 +298,11 @@ impl AppState {
             .map(|p| (p.username.clone(), p))
             .collect();
         Self {
-            memuc,
+            emulator,
+            emulator_reload: None,
             geo,
             adb,
+            adb_reload: None,
             store,
             queue,
             settings: Mutex::new(settings),
@@ -100,10 +312,88 @@ impl AppState {
             running_sessions: Mutex::new(HashSet::new()),
             profiles: Mutex::new(profiles),
             running_profiles: std::sync::Mutex::new(HashMap::new()),
+            stopping_profiles: std::sync::Mutex::new(HashSet::new()),
+            magisk_bin: std::sync::Mutex::new(None),
+            fingerprint_locks: Mutex::new(HashMap::new()),
+            fixable_tells: Mutex::new(HashMap::new()),
         }
     }
 
+    /// Constructor production: adapter trait object ben ngoai on dinh, inner co the swap runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_reloadable(
+        emulator: Arc<dyn EmulatorClient>,
+        emulator_reload: Arc<ReloadableEmulatorClient>,
+        geo: Arc<dyn IpGeolocator>,
+        adb: Arc<dyn AdbWorker>,
+        adb_reload: Arc<ReloadableAdbWorker>,
+        store: Arc<dyn SnapshotStore>,
+        settings: AppSettings,
+        db: Option<Db>,
+        metadata: HashMap<u32, InstanceMeta>,
+    ) -> Self {
+        let mut state = Self::new(emulator, geo, adb, store, settings, db, metadata);
+        state.emulator_reload = Some(emulator_reload);
+        state.adb_reload = Some(adb_reload);
+        state
+    }
+
+    pub fn reload_clients(
+        &self,
+        emulator: Arc<dyn EmulatorClient>,
+        adb: Arc<dyn AdbWorker>,
+    ) -> bool {
+        match (&self.emulator_reload, &self.adb_reload) {
+            (Some(emulator_reload), Some(adb_reload)) => {
+                emulator_reload.replace(emulator);
+                adb_reload.replace(adb);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Dat duong dan binary magisk (resetprop) da trich.
+    pub fn set_magisk_bin(&self, path: Option<std::path::PathBuf>) {
+        *self.magisk_bin.lock().unwrap() = path;
+    }
+
+    /// Đường dẫn binary magisk (nếu có) — provision đẩy vào VM để khóa model.
+    pub fn magisk_bin(&self) -> Option<std::path::PathBuf> {
+        self.magisk_bin.lock().unwrap().clone()
+    }
+
     /// Ghi/cập nhật profile vào bộ nhớ + DB.
+    pub async fn set_fingerprint_lock_status(&self, index: u32, status: FingerprintLockStatus) {
+        self.fingerprint_locks.lock().await.insert(index, status);
+    }
+
+    pub async fn fingerprint_lock_status(&self, index: u32) -> FingerprintLockStatus {
+        self.fingerprint_locks
+            .lock()
+            .await
+            .get(&index)
+            .cloned()
+            .unwrap_or_else(FingerprintLockStatus::not_attempted)
+    }
+
+    pub async fn set_fixable_tells(&self, index: u32, tells: Vec<String>) {
+        self.fixable_tells.lock().await.insert(index, tells);
+    }
+
+    pub async fn provision_health(&self, index: u32) -> ProvisionHealth {
+        ProvisionHealth {
+            fingerprint_lock: self.fingerprint_lock_status(index).await,
+            fixable_tells: self
+                .fixable_tells
+                .lock()
+                .await
+                .get(&index)
+                .cloned()
+                .unwrap_or_default(),
+        }
+    }
+
     pub async fn upsert_profile(&self, profile: Profile) {
         if let Some(db) = &self.db {
             let _ = db.upsert_profile(&profile);
@@ -128,6 +418,7 @@ impl AppState {
     pub async fn delete_profile(&self, username: &str) {
         self.profiles.lock().await.remove(username);
         self.running_profiles.lock().unwrap().remove(username);
+        self.stopping_profiles.lock().unwrap().remove(username);
         if let Some(db) = &self.db {
             let _ = db.delete_profile(username);
             let _ = db.remove_running(username);
@@ -147,11 +438,17 @@ impl AppState {
 
     /// True nếu profile đang GIỮA giai đoạn provision (đã đặt chỗ `RESERVED_VM`, VM thật
     /// chưa xong). Dùng để `stop`/`delete` từ chối thao tác khi run đang bay.
+    #[cfg(test)]
     pub async fn is_reserved(&self, username: &str) -> bool {
         self.running_profiles.lock().unwrap().get(username).copied() == Some(RESERVED_VM)
     }
 
+    pub async fn is_stopping(&self, username: &str) -> bool {
+        self.stopping_profiles.lock().unwrap().contains(username)
+    }
+
     pub async fn set_running_profile(&self, username: &str, vm_index: u32) {
+        self.stopping_profiles.lock().unwrap().remove(username);
         self.running_profiles
             .lock()
             .unwrap()
@@ -164,6 +461,19 @@ impl AppState {
 
     pub async fn clear_running_profile(&self, username: &str) {
         self.running_profiles.lock().unwrap().remove(username);
+        self.stopping_profiles.lock().unwrap().remove(username);
+        if let Some(db) = &self.db {
+            let _ = db.remove_running(username);
+        }
+    }
+
+    pub fn record_running_marker(&self, username: &str, vm_index: u32) {
+        if let Some(db) = &self.db {
+            let _ = db.record_running(username, vm_index);
+        }
+    }
+
+    pub fn clear_running_marker(&self, username: &str) {
         if let Some(db) = &self.db {
             let _ = db.remove_running(username);
         }
@@ -174,6 +484,9 @@ impl AppState {
     /// không provision đôi. Caller nhận `Reserved` phải finalize bằng `set_running_profile`
     /// (thành công) hoặc `clear_running_profile` (lỗi) để nhả chỗ.
     pub async fn reserve_run_slot(&self, username: &str, max: usize) -> RunSlot {
+        if self.stopping_profiles.lock().unwrap().contains(username) {
+            return RunSlot::Stopping;
+        }
         let mut g = self.running_profiles.lock().unwrap();
         match g.get(username).copied() {
             Some(v) if v != RESERVED_VM => return RunSlot::AlreadyRunning(v),
@@ -187,25 +500,41 @@ impl AppState {
         RunSlot::Reserved
     }
 
-    /// NGUYÊN TỬ lấy-và-xóa vm_index đang chạy (bỏ qua slot đặt chỗ). Chỉ MỘT caller
-    /// thắng entry → chống teardown đôi khi hai `stop`/`delete` chạy song song.
-    pub async fn take_running_vm(&self, username: &str) -> Option<u32> {
-        let taken = {
-            let mut g = self.running_profiles.lock().unwrap();
-            match g.get(username).copied() {
-                Some(v) if v != RESERVED_VM => {
-                    g.remove(username);
-                    Some(v)
-                }
-                _ => None,
-            }
-        };
-        if taken.is_some() {
-            if let Some(db) = &self.db {
-                let _ = db.remove_running(username);
+    pub async fn begin_teardown_profile(&self, username: &str) -> TeardownSlot {
+        {
+            let mut stopping = self.stopping_profiles.lock().unwrap();
+            if !stopping.insert(username.to_string()) {
+                return TeardownSlot::AlreadyStopping;
             }
         }
-        taken
+
+        let idx = match self.running_profiles.lock().unwrap().get(username).copied() {
+            Some(v) if v == RESERVED_VM => {
+                self.stopping_profiles.lock().unwrap().remove(username);
+                return TeardownSlot::Pending;
+            }
+            Some(v) => v,
+            None => {
+                self.stopping_profiles.lock().unwrap().remove(username);
+                return TeardownSlot::NotRunning;
+            }
+        };
+        if idx == RESERVED_VM {
+            return TeardownSlot::AlreadyStopping;
+        }
+        TeardownSlot::Ready(idx)
+    }
+
+    pub async fn finish_teardown_profile(&self, username: &str) {
+        self.running_profiles.lock().unwrap().remove(username);
+        self.stopping_profiles.lock().unwrap().remove(username);
+        if let Some(db) = &self.db {
+            let _ = db.remove_running(username);
+        }
+    }
+
+    pub async fn abort_teardown_profile(&self, username: &str) {
+        self.stopping_profiles.lock().unwrap().remove(username);
     }
 
     /// Ghi write-through xuống SQLite (best-effort; lỗi chỉ log).
@@ -243,6 +572,8 @@ impl AppState {
 
     pub async fn forget(&self, index: u32) {
         self.metadata.lock().await.remove(&index);
+        self.fingerprint_locks.lock().await.remove(&index);
+        self.fixable_tells.lock().await.remove(&index);
         if let Some(db) = &self.db {
             let _ = db.delete(index);
         }
@@ -256,4 +587,26 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emulator::MockClient;
+
+    #[tokio::test]
+    async fn reloadable_emulator_swaps_inner_client() {
+        let first = Arc::new(MockClient::new());
+        first.create().await.unwrap();
+        let reloadable = ReloadableEmulatorClient::new(first);
+
+        assert_eq!(reloadable.list_instances().await.unwrap().len(), 1);
+
+        reloadable.replace(Arc::new(MockClient::new()));
+
+        assert!(
+            reloadable.list_instances().await.unwrap().is_empty(),
+            "after reload, calls must use the replacement emulator client"
+        );
+    }
 }

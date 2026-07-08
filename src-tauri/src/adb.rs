@@ -1,7 +1,7 @@
 //! ADB Worker (§ thiết kế Backup/Restore §4). Trích xuất/nạp dữ liệu app TikTok
-//! trong máy ảo qua `memuc adb` + root. Trừu tượng sau trait [`AdbWorker`]:
-//! `RealAdbWorker` gọi memuc thật; `MockAdbWorker` mô phỏng thiết bị trong bộ nhớ
-//! để test round-trip mà không cần MEmu.
+//! trong máy ảo qua `MuMuManager.exe adb` + root. Trừu tượng sau trait [`AdbWorker`]:
+//! `RealAdbWorker` gọi MuMuManager thật; `MockAdbWorker` mô phỏng thiết bị trong bộ nhớ
+//! để test round-trip mà không cần MuMu.
 
 use std::collections::HashMap;
 use std::fs;
@@ -17,7 +17,7 @@ use crate::humanize::{self, Rng};
 use crate::model::{EmulatorTell, HardwareProfile, SnapshotMeta};
 use crate::snapshot::sha256_file;
 
-/// Trần thời gian cho một lệnh `memuc adb`. Đủ rộng cho thao tác nặng nhất
+/// Trần thời gian cho một lệnh `MuMuManager.exe adb`. Đủ rộng cho thao tác nặng nhất
 /// (install APK ~220MB, backup/restore) nhưng vẫn chặn treo vô hạn nếu adb đơ.
 const ADB_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -27,8 +27,19 @@ pub trait AdbWorker: Send + Sync {
     async fn backup(&self, idx: u32, pkg: &str, out: &Path) -> AppResult<SnapshotMeta>;
     /// Nạp `archive` vào `/data/data/<pkg>` của VM `idx` (kèm chown + restorecon).
     async fn restore(&self, idx: u32, pkg: &str, archive: &Path) -> AppResult<()>;
-    /// Đặt Android ID (qua adb, không phải khoá memuc — §15 thiết kế).
+    /// Phiên bản APK hiện đang cài trong VM. Dùng để chặn restore snapshot lệch schema.
+    async fn apk_version(&self, idx: u32, pkg: &str) -> AppResult<String>;
+    /// Đặt Android ID (qua adb, không phải khoá MuMuManager — §15 thiết kế).
     async fn apply_android_id(&self, idx: u32, android_id: &str) -> AppResult<()>;
+    /// Force logical display size/density after Android boot. MuMu `custom_resolution`
+    /// can configure the VM window while Android still reports its default `wm` metrics.
+    async fn apply_display_profile(
+        &self,
+        idx: u32,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    ) -> AppResult<bool>;
     /// Chờ Android boot xong (`sys.boot_completed == 1`) thay vì sleep cố định.
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()>;
     /// Mở app Android (launcher intent).
@@ -39,12 +50,16 @@ pub trait AdbWorker: Send + Sync {
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()>;
     /// Scan dấu vết emulator (native check qua adb) → báo cáo từng mục.
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>>;
-    /// Ẩn/sửa các dấu vết SỬA ĐƯỢC (best-effort; ro.* cần reboot mới ăn).
+    /// Ẩn/sửa các dấu vết runtime best-effort; ro.* được xử lý bằng resetprop trong lock_device_identity.
     async fn harden(&self, idx: u32) -> AppResult<()>;
+    /// Đẩy binary `magisk` (chứa applet resetprop, trích từ Magisk APK) vào VM tại
+    /// `/data/local/tmp/magisk` + chmod + verify (`magisk -c`). VM đã có root (enable_su)
+    /// nên KHÔNG cần cài Magisk hệ thống. Trả `Ok(true)` nếu binary chạy được.
+    async fn push_resetprop(&self, idx: u32, local_bin: &str) -> AppResult<bool>;
     /// KHÓA định danh thiết bị (ro.product.model/brand/manufacturer/device +
-    /// ro.build.fingerprint) SAU boot bằng **resetprop** — chống MEmu random model.
-    /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop (cần Magisk trong base
-    /// image — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
+    /// ro.build.fingerprint) SAU boot bằng **resetprop** — chống MuMu random model.
+    /// Best-effort: trả `Ok(false)` nếu VM chưa có resetprop/magisk (đặt Magisk APK trong
+    /// Cài đặt — xem docs/BASE_IMAGE_MAGISK_SETUP.md); `Ok(true)` nếu khóa & verify được.
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool>;
     /// Tap có rung tọa độ + thời gian giữ ngẫu nhiên. ⚠️ HẠN CHẾ THẬT: hiện dùng
     /// `input swipe pt pt hold` — sự kiện BƠM (injected, không có luồng touch
@@ -56,29 +71,115 @@ pub trait AdbWorker: Send + Sync {
     /// → Android nội suy ĐƯỜNG THẲNG vận tốc tuyến tính (một dấu hiệu bot rõ). Chưa
     /// đạt "chống touch-jitter check"; cần sendevent phát lại toàn đường (TODO).
     async fn human_swipe(&self, idx: u32, x0: i32, y0: i32, x1: i32, y1: i32) -> AppResult<()>;
+    /// Nạp file media (video, ảnh) từ máy tính vào máy ảo (Mục Camera)
+    /// và gọi broadcast quét media để xuất hiện ngay trong thư viện.
+    async fn upload_media(&self, idx: u32, local_path: &str) -> AppResult<()>;
 }
 
-// ------------------------ Real (memuc adb) ------------------------
-
-pub struct RealAdbWorker {
-    memuc_path: PathBuf,
+fn sh_escape(value: &str) -> String {
+    value.replace('\'', "'\\''")
 }
 
-impl RealAdbWorker {
-    pub fn new(memuc_path: impl Into<PathBuf>) -> Self {
-        Self {
-            memuc_path: memuc_path.into(),
+/// Trích số version từ output `dumpsys ... | grep versionName`. MuMuManager chèn nhiễu
+/// ("already connected to 127.0.0.1:...", "daemon started") vào stdout NGOÀI pipe grep của
+/// device → nếu giữ cả chuỗi, snapshot lưu version BẨN và so sánh restore lệch dù version
+/// thực giống nhau (bug thật đã gặp). Có "versionName=" → lấy token đầu sau nó; không có
+/// (vd giá trị mock/"unknown") → giữ nguyên đã trim.
+pub(crate) fn normalize_apk_version(raw: &str) -> String {
+    raw.lines()
+        .filter_map(|l| l.split("versionName=").nth(1))
+        .map(|v| v.split_whitespace().next().unwrap_or("").trim())
+        .find(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| raw.trim().to_string())
+}
+
+fn build_lock_script(rp: &str, hw: &HardwareProfile) -> String {
+    let mut script = String::from("#!/system/bin/sh\n");
+
+    for p in ["ro.kernel.qemu", "ro.boot.qemu", "ro.mumu.version"] {
+        script.push_str(&format!("{rp} --delete {p}\n"));
+    }
+
+    let core: [(&str, &str); 7] = [
+        ("ro.product.model", &hw.model),
+        ("ro.product.brand", &hw.brand),
+        ("ro.product.manufacturer", &hw.manufacturer),
+        ("ro.product.device", &hw.device),
+        ("ro.product.name", &hw.device),
+        ("ro.build.fingerprint", &hw.build_fingerprint),
+        ("ro.product.board", &hw.device),
+    ];
+    for (key, val) in core {
+        if !val.is_empty() {
+            script.push_str(&format!("{rp} {key} '{}'\n", sh_escape(val)));
         }
     }
 
-    /// Chạy `memuc -i <idx> adb "<adb_arg>"`, trả về stdout dạng bytes.
+    let coherent: [(&str, &str); 5] = [
+        ("ro.hardware", &hw.soc_hardware),
+        ("ro.board.platform", &hw.board_platform),
+        ("ro.hardware.egl", &hw.gpu_egl),
+        ("ro.build.version.security_patch", &hw.security_patch),
+        ("ro.build.characteristics", &hw.build_characteristics),
+    ];
+    for (key, val) in coherent {
+        if val.is_empty() {
+            if key == "ro.build.characteristics" {
+                script.push_str(&format!("{rp} --delete {key}\n"));
+            }
+            continue;
+        }
+        script.push_str(&format!("{rp} {key} '{}'\n", sh_escape(val)));
+    }
+
+    for (key, val) in [
+        ("ro.build.tags", "release-keys"),
+        ("ro.build.type", "user"),
+        ("ro.secure", "1"),
+        ("ro.debuggable", "0"),
+    ] {
+        script.push_str(&format!("{rp} {key} '{val}'\n"));
+    }
+    script.push_str(&format!("{rp} sys.usb.state 'mtp'\n"));
+
+    for f in [
+        "/dev/qemu_pipe",
+        "/dev/socket/qemud",
+        "/dev/socket/genyd",
+        "/system/lib/vboxguest.ko",
+        "/system/bin/nemuVM-tools",
+        "/system/xbin/nemuVM-tools",
+    ] {
+        script.push_str(&format!(
+            "if [ -e {f} ]; then mount -o bind /dev/null {f}; fi\n"
+        ));
+    }
+
+    script
+}
+
+// ------------------------ Real (MuMuManager adb) ------------------------
+
+pub struct RealAdbWorker {
+    manager_path: PathBuf,
+}
+
+impl RealAdbWorker {
+    pub fn new(manager_path: impl Into<PathBuf>) -> Self {
+        Self {
+            manager_path: manager_path.into(),
+        }
+    }
+
+    /// Chạy `MuMuManager.exe adb -v <idx> -c "<adb_arg>"`, trả về stdout dạng bytes.
     ///
     /// - **CREATE_NO_WINDOW**: ẩn cửa sổ console → KHÔNG nhấp nháy khi poll boot
     ///   (mỗi 3s) hay gọi adb liên tục (fix "cửa sổ cmd chớp nháy").
     /// - **kill_on_drop + timeout**: hết giờ thì hủy tiến trình con, không treo vô hạn.
     async fn adb(&self, idx: u32, adb_arg: &str) -> AppResult<Vec<u8>> {
-        let mut cmd = Command::new(&self.memuc_path);
-        cmd.args(["-i", &idx.to_string(), "adb", adb_arg]);
+        let mut cmd = Command::new(&self.manager_path);
+        cmd.args(["adb", "-v", &idx.to_string(), "-c", adb_arg]);
         cmd.kill_on_drop(true);
         #[cfg(windows)]
         {
@@ -87,7 +188,8 @@ impl RealAdbWorker {
         }
         let output = timeout(ADB_TIMEOUT, cmd.output())
             .await
-            .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))??;
+            .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))?
+            .map_err(command_error)?;
         if !output.status.success() {
             let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(AppError::CommandFailed(format!("adb '{adb_arg}': {err}")));
@@ -95,7 +197,45 @@ impl RealAdbWorker {
         Ok(output.stdout)
     }
 
-    /// getprop sạch nhiễu "already connected" của memuc adb.
+    /// Chạy `MuMuManager.exe adb -v <idx> -c "<args...>"` với mảng tham số trực tiếp.
+    /// Giúp tránh lỗi shlex phân tích đường dẫn Windows (mất dấu \).
+    async fn adb_args(&self, idx: u32, adb_args: &[&str]) -> AppResult<Vec<u8>> {
+        let mut joined = String::new();
+        for arg in adb_args {
+            if !joined.is_empty() {
+                joined.push(' ');
+            }
+            if arg.contains(' ') {
+                joined.push_str(&format!("\"{}\"", arg));
+            } else {
+                joined.push_str(arg);
+            }
+        }
+        let mut cmd = Command::new(&self.manager_path);
+        cmd.args(["adb", "-v", &idx.to_string(), "-c", &joined]);
+        cmd.kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = timeout(ADB_TIMEOUT, cmd.output())
+            .await
+            .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))?
+            .map_err(command_error)?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(AppError::CommandFailed(format!(
+                "adb {:?}: {}",
+                adb_args, err
+            )));
+        }
+        Ok(output.stdout)
+    }
+
+    /// getprop sạch nhiễu MuMuManager adb. `getprop <name>` cho DÚNG MỘT dòng giá trị; mọi nhiễu
+    /// ("already connected", "daemon started"...) MuMuManager chèn nằm TRƯỚC → lấy dòng SẠCH CUỐI
+    /// cùng. KHÔNG join tất cả (nhiễu sẽ dính vào value → verify sai — finding resolve-logic).
     async fn prop(&self, idx: u32, name: &str) -> String {
         let out = self
             .adb(idx, &format!("shell getprop {name}"))
@@ -104,94 +244,220 @@ impl RealAdbWorker {
         String::from_utf8_lossy(&out)
             .lines()
             .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.contains("already connected"))
-            .collect::<Vec<_>>()
-            .join("")
+            .rfind(|l| !l.is_empty() && !l.contains("already connected"))
+            .unwrap_or("")
+            .to_string()
+    }
+}
+
+fn command_error(e: std::io::Error) -> AppError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        AppError::EmulatorNotFound
+    } else {
+        AppError::Io(e.to_string())
+    }
+}
+
+fn tar_archive_looks_valid(path: &Path) -> AppResult<bool> {
+    let bytes = fs::read(path)?;
+    if bytes.len() < 1024 || bytes.len() % 512 != 0 {
+        return Ok(false);
+    }
+
+    let mut offset = 0usize;
+    let mut entries = 0usize;
+    while offset + 512 <= bytes.len() {
+        let header = &bytes[offset..offset + 512];
+        if header.iter().all(|&b| b == 0) {
+            return Ok(entries > 0);
+        }
+
+        let name = &header[..100];
+        if name.iter().all(|&b| b == 0) {
+            return Ok(false);
+        }
+
+        let size_field = &header[124..136];
+        let size_text: String = size_field
+            .iter()
+            .copied()
+            .take_while(|&b| b != 0 && b != b' ')
+            .map(char::from)
+            .collect();
+        let size = if size_text.trim().is_empty() {
+            0usize
+        } else {
+            usize::from_str_radix(size_text.trim(), 8).unwrap_or(0)
+        };
+        entries += 1;
+        let data_blocks = size.div_ceil(512);
+        offset += 512 + data_blocks * 512;
+    }
+
+    Ok(false)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn safe_remote_media_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().max(1));
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' ') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches([' ', '.']).trim();
+    if trimmed.is_empty() {
+        "media.bin".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
 #[async_trait]
 impl AdbWorker for RealAdbWorker {
     async fn backup(&self, idx: u32, pkg: &str, out: &Path) -> AppResult<SnapshotMeta> {
+        // Đảm bảo adb chạy dưới quyền root (MuMu 12 không có `su`, phải dùng `adb root`).
+        let _ = self.adb(idx, "root").await;
         // Dừng app sạch để flush SQLite ra đĩa (§14.1).
-        self.adb(idx, &format!("shell su -c 'am force-stop {pkg}'"))
-            .await?;
-        // tar chỉ thư mục cần, loại cache; lấy binary qua exec-out.
+        self.adb(idx, &format!("shell am force-stop {pkg}")).await?;
+        // Tar TRÊN THIẾT BỊ ra FILE rồi `adb pull`
+        let remote = format!("/data/local/tmp/mpm-backup-{idx}.tar");
         let tar_cmd = format!(
-            "exec-out su -c 'cd /data/data/{pkg} && tar \
+            "shell cd /data/data/{pkg} && tar \
              --exclude=cache --exclude=code_cache --exclude=app_webview/*/GPUCache \
-             -cf - shared_prefs databases files app_webview'"
+             --exclude=files/aweme --exclude=files/music --exclude=files/offline --exclude=files/splash --exclude=files/logs \
+             --exclude=files/cache --exclude=files/plugins --exclude=files/unzip --exclude=files/debug \
+             -cf {remote} shared_prefs databases files app_webview; chmod 644 {remote}"
         );
-        let tar = self.adb(idx, &tar_cmd).await?;
-        fs::write(out, &tar)?;
+        self.adb(idx, &tar_cmd).await?;
+        // pull nhị phân-an-toàn (bọc nháy đường dẫn cục bộ: có thể chứa khoảng trắng).
+        self.adb(idx, &format!("pull {remote} \"{}\"", out.display()))
+            .await?;
+        let _ = self.adb(idx, &format!("shell rm -f {remote}")).await;
 
-        let apk = String::from_utf8_lossy(
-            &self
-                .adb(
-                    idx,
-                    &format!("shell dumpsys package {pkg} | grep versionName"),
-                )
-                .await
-                .unwrap_or_default(),
-        )
-        .trim()
-        .to_string();
+        // Chặn snapshot RỖNG (tar thất bại toàn bộ / pkg dir không tồn tại) — R-15 không
+        // được ghi bản backup ma rồi hủy VM. Archive hợp lệ tối thiểu (chỉ files/) ~2.5KB.
+        let size = fs::metadata(out).map(|m| m.len()).unwrap_or(0);
+        if size == 0 || !tar_archive_looks_valid(out)? {
+            return Err(AppError::CommandFailed(format!(
+                "backup: archive rỗng/không hợp lệ cho {pkg} (VM idx {idx}) — không có dữ liệu để lưu"
+            )));
+        }
+
+        let apk = self
+            .apk_version(idx, pkg)
+            .await
+            .unwrap_or_else(|_| "unknown".into());
 
         Ok(SnapshotMeta {
             sha256: sha256_file(out)?,
-            size_bytes: tar.len() as u64,
-            apk_version: if apk.is_empty() {
-                "unknown".into()
-            } else {
-                apk
-            },
+            size_bytes: size,
+            apk_version: apk,
         })
     }
 
     async fn restore(&self, idx: u32, pkg: &str, archive: &Path) -> AppResult<()> {
+        let _ = self.adb(idx, "root").await;
         let name = archive
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("snapshot.tar");
         let remote = format!("/data/local/tmp/{name}");
 
-        self.adb(idx, &format!("shell su -c 'am force-stop {pkg}'"))
-            .await?;
+        self.adb(idx, &format!("shell am force-stop {pkg}")).await?;
         // Bọc nháy đường dẫn cục bộ: thư mục temp/tên user có thể chứa khoảng trắng.
         self.adb(idx, &format!("push \"{}\" {remote}", archive.display()))
             .await?;
         // Giải nén vào /data/data (tar; nếu là .zst cần giải nén trước — xem runbook §14.2).
-        self.adb(
-            idx,
-            &format!("shell su -c 'tar -xf {remote} -C /data/data/{pkg}'"),
-        )
-        .await?;
+        self.adb(idx, &format!("shell tar -xf {remote} -C /data/data/{pkg}"))
+            .await?;
         // BẮT BUỘC: sửa chủ sở hữu theo UID hiện tại + nhãn SELinux (§14.2 / R-14).
         let fix = format!(
-            "shell su -c 'U=$(stat -c %U /data/data/{pkg}); \
-             chown -R $U:$U /data/data/{pkg} && restorecon -R /data/data/{pkg}'"
+            "shell U=$(stat -c %u /data/data/{pkg}); \
+             chown -R $U:$U /data/data/{pkg} && restorecon -R /data/data/{pkg}"
         );
         self.adb(idx, &fix).await?;
-        self.adb(idx, &format!("shell su -c 'rm -f {remote}'"))
-            .await?;
+        self.adb(idx, &format!("shell rm -f {remote}")).await?;
         Ok(())
     }
 
+    async fn apk_version(&self, idx: u32, pkg: &str) -> AppResult<String> {
+        let out = self
+            .adb(
+                idx,
+                &format!("shell dumpsys package {pkg} | grep versionName"),
+            )
+            .await?;
+        let version = normalize_apk_version(&String::from_utf8_lossy(&out));
+        Ok(if version.is_empty() {
+            "unknown".into()
+        } else {
+            version
+        })
+    }
+
     async fn apply_android_id(&self, idx: u32, android_id: &str) -> AppResult<()> {
+        let _ = self.adb(idx, "root").await;
         self.adb(
             idx,
-            &format!("shell su -c 'settings put secure android_id {android_id}'"),
+            &format!("shell settings put secure android_id {android_id}"),
         )
         .await
         .map(|_| ())
     }
 
+    async fn apply_display_profile(
+        &self,
+        idx: u32,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    ) -> AppResult<bool> {
+        if width == 0 || height == 0 || dpi < 72 {
+            return Ok(false);
+        }
+
+        let _ = self.adb(idx, "root").await;
+        self.adb(idx, &format!("shell wm size {width}x{height}"))
+            .await?;
+        self.adb(idx, &format!("shell wm density {dpi}")).await?;
+        sleep(Duration::from_millis(500)).await;
+
+        let size_out = self.adb(idx, "shell wm size").await.unwrap_or_default();
+        let density_out = self.adb(idx, "shell wm density").await.unwrap_or_default();
+        let size_text = String::from_utf8_lossy(&size_out);
+        let density_text = String::from_utf8_lossy(&density_out);
+        let expected_size = format!("{width}x{height}");
+        let expected_density = dpi.to_string();
+        let size_ok = size_text.contains(&expected_size);
+        let density_ok = density_text
+            .split(|c: char| !c.is_ascii_digit())
+            .any(|token| token == expected_density);
+
+        if !size_ok || !density_ok {
+            tracing::warn!(
+                idx,
+                expected_size,
+                expected_density,
+                size = %size_text.trim(),
+                density = %density_text.trim(),
+                "wm size/density khong khop profile sau khi apply"
+            );
+        }
+
+        Ok(size_ok && density_ok)
+    }
 
     async fn wait_boot_completed(&self, idx: u32) -> AppResult<()> {
         use tokio::time::sleep;
         // Poll tối đa ~180s. Boot có thể vượt 90s khi host tải nặng (nhiều VM chạy) —
-        // phát hiện qua test thực. `memuc adb` có thể chèn dòng "already connected ..."
-        // trước giá trị → lấy token cuối cùng để so sánh (bug đã gặp trên MEmu thật).
+        // phát hiện qua test thực. `MuMuManager adb` có thể chèn dòng "already connected ..."
+        // trước giá trị → lấy token cuối cùng để so sánh (bug đã gặp trên MuMu thật).
         for _ in 0..60 {
             let out = self
                 .adb(idx, "shell getprop sys.boot_completed")
@@ -217,7 +483,7 @@ impl AdbWorker for RealAdbWorker {
 
     async fn install_apk(&self, idx: u32, apk_path: &str) -> AppResult<()> {
         // -r: cài đè nếu đã có; -g: cấp sẵn quyền runtime.
-        // ⚠️ --no-streaming BẮT BUỘC: MEmu KHÔNG hỗ trợ streamed install — adb mặc định
+        // ⚠️ --no-streaming BẮT BUỘC: MuMu KHÔNG hỗ trợ streamed install — adb mặc định
         //    dùng streamed → "adb: failed to install ...: Performing Streamed Install"
         //    (thất bại tức thì, không push byte nào; kiểm chứng qua test thực). Ép chế độ
         //    push-rồi-install (--no-streaming) mới cài được (230MB push ~12s → "Success").
@@ -238,8 +504,8 @@ impl AdbWorker for RealAdbWorker {
         const MAX_TRIES: u32 = 3;
         let mut last = String::new();
         for attempt in 1..=MAX_TRIES {
-            let mut cmd = Command::new(&self.memuc_path);
-            cmd.args(["-i", &idx.to_string(), "adb", &arg]);
+            let mut cmd = Command::new(&self.manager_path);
+            cmd.args(["adb", "-v", &idx.to_string(), "-c", &arg]);
             cmd.kill_on_drop(true);
             #[cfg(windows)]
             {
@@ -248,14 +514,20 @@ impl AdbWorker for RealAdbWorker {
             }
             let output = timeout(ADB_TIMEOUT, cmd.output())
                 .await
-                .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))??;
+                .map_err(|_| AppError::Timeout(ADB_TIMEOUT.as_secs()))?
+                .map_err(command_error)?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stdout.contains("Success") || stderr.contains("Success") {
                 return Ok(());
             }
             last = format!("out={}, err={}", stdout.trim(), stderr.trim());
-            tracing::warn!(idx, attempt, max = MAX_TRIES, "adb install lỗi, thử lại: {last}");
+            tracing::warn!(
+                idx,
+                attempt,
+                max = MAX_TRIES,
+                "adb install lỗi, thử lại: {last}"
+            );
             if attempt < MAX_TRIES {
                 sleep(Duration::from_secs(4)).await;
             }
@@ -266,13 +538,15 @@ impl AdbWorker for RealAdbWorker {
     }
 
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()> {
-        // Shell user có quyền disable-user (kiểm chứng trên MEmu thật) — không cần root.
+        // Shell user có quyền disable-user (kiểm chứng trên MuMu thật) — không cần root.
         self.adb(idx, &format!("shell pm disable-user --user 0 {pkg}"))
             .await
             .map(|_| ())
     }
 
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>> {
+        // MuMu 12 không có `su` — adbd chạy root qua `adb root`; các check dưới chạy trực tiếp.
+        let _ = self.adb(idx, "root").await;
         let mut tells = Vec::new();
 
         let nb = self.prop(idx, "ro.dalvik.vm.native.bridge").await;
@@ -311,18 +585,17 @@ impl AdbWorker for RealAdbWorker {
             "/dev/socket/qemud",
             "/dev/socket/genyd",
             "/system/lib/libc_malloc_debug_qemu.so",
+            "/system/bin/nemuVM-tools",
+            "/system/xbin/nemuVM-tools",
         ] {
+            // Nếu file bị mount đè (có trong /proc/mounts), tức là ta đã ẩn nó thành công
+            let check_cmd = format!("if [ -e {f} ]; then if grep -q ' {f} ' /proc/mounts; then echo 'HIDDEN_MOUNT'; else echo 'EXISTS'; fi; else echo 'NOT_FOUND'; fi");
             let r = self
-                .adb(idx, &format!("shell ls {f}"))
+                .adb(idx, &format!("shell {check_cmd}"))
                 .await
                 .unwrap_or_default();
             let s = String::from_utf8_lossy(&r);
-            // Chỉ tính là "có" khi ls in ra đúng đường dẫn, KHÔNG kèm thông báo lỗi
-            // (No such / Permission denied / not found) — tránh dương tính giả.
-            let errored = ["No such", "Permission denied", "not found"]
-                .iter()
-                .any(|e| s.contains(e));
-            if s.contains(f) && !errored {
+            if s.contains("EXISTS") {
                 found.push(f);
             }
         }
@@ -365,6 +638,69 @@ impl AdbWorker for RealAdbWorker {
             .into(),
         });
 
+        let features = self
+            .adb(idx, "shell pm list features")
+            .await
+            .unwrap_or_default();
+        let sensor_dump = self
+            .adb(idx, "shell dumpsys sensorservice")
+            .await
+            .unwrap_or_default();
+        let sensor_text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&features),
+            String::from_utf8_lossy(&sensor_dump)
+        )
+        .to_lowercase();
+        let has_accel = sensor_text.contains("accelerometer");
+        let has_gyro = sensor_text.contains("gyroscope") || sensor_text.contains(" gyro");
+        let has_magnet = sensor_text.contains("magnetometer")
+            || sensor_text.contains("magnetic field")
+            || sensor_text.contains("compass");
+        let has_rotation = sensor_text.contains("rotation vector");
+        let mut missing = Vec::new();
+        if !has_accel {
+            missing.push("accelerometer");
+        }
+        if !has_gyro {
+            missing.push("gyroscope");
+        }
+        if !has_magnet {
+            missing.push("magnetometer");
+        }
+        tells.push(EmulatorTell {
+            check: "Motion sensors".into(),
+            detected: !missing.is_empty(),
+            detail: if missing.is_empty() {
+                format!(
+                    "accel/gyro/magnetometer co; rotation_vector={}",
+                    if has_rotation { "co" } else { "thieu" }
+                )
+            } else {
+                format!("thieu: {}", missing.join(", "))
+            },
+        });
+
+        let sensor_provider_tells: Vec<&str> = [
+            "goldfish",
+            "ranchu",
+            "qemu",
+            "virtual sensor",
+            "mock sensor",
+        ]
+        .into_iter()
+        .filter(|needle| sensor_text.contains(needle))
+        .collect();
+        tells.push(EmulatorTell {
+            check: "Sensor provider tells".into(),
+            detected: !sensor_provider_tells.is_empty(),
+            detail: if sensor_provider_tells.is_empty() {
+                "khong thay chuoi sensor gia lap pho bien".into()
+            } else {
+                sensor_provider_tells.join(", ")
+            },
+        });
+
         let bc = self.prop(idx, "ro.build.characteristics").await;
         tells.push(EmulatorTell {
             check: "ro.build.characteristics".into(),
@@ -372,13 +708,26 @@ impl AdbWorker for RealAdbWorker {
             detail: bc,
         });
 
-        // Base image sẵn-sàng-Magisk? resetprop có → khóa được ro.product.model/android_id
-        // (chống MEmu random model). KHÔNG có → model bị ghi đè, fingerprint coherent lệch.
+        let tags = self.prop(idx, "ro.build.tags").await;
+        tells.push(EmulatorTell {
+            check: "ro.build.tags".into(),
+            detected: tags == "test-keys",
+            detail: if tags.is_empty() {
+                "rỗng".into()
+            } else {
+                tags
+            },
+        });
+
+        // Có resetprop? → khóa được ro.product.model/android_id (chống MuMu random model).
+        // KHÔNG có → model bị ghi đè, fingerprint coherent lệch. Kiểm CẢ binary magisk MPM
+        // đẩy vào (/data/local/tmp/magisk) LẪN resetprop standalone (Magisk hệ thống).
+        let vm = crate::magisk::VM_MAGISK_PATH;
         let rp = String::from_utf8_lossy(
             &self
                 .adb(
                     idx,
-                    "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo yes && break; done'",
+                    &format!("shell ([ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo yes) || command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo yes && break; done"),
                 )
                 .await
                 .unwrap_or_default(),
@@ -390,9 +739,9 @@ impl AdbWorker for RealAdbWorker {
             // detected=true = CÓ VẤN ĐỀ: thiếu resetprop → model KHÔNG khóa được.
             detected: !has_resetprop,
             detail: if has_resetprop {
-                "có resetprop — khóa được model/android_id".into()
+                "co resetprop - khoa duoc model/fingerprint/characteristics runtime".into()
             } else {
-                "THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)".into()
+                "THIẾU — model bị MuMu ghi đè (đặt Magisk APK trong Cài đặt)".into()
             },
         });
 
@@ -400,61 +749,142 @@ impl AdbWorker for RealAdbWorker {
     }
 
     async fn harden(&self, idx: u32) -> AppResult<()> {
+        // MuMu 12 không có `su` — root qua adb root; các lệnh dưới chạy trực tiếp.
+        let _ = self.adb(idx, "root").await;
         // Xóa prop camera giả (runtime-settable).
         let _ = self.adb(idx, "shell setprop qemu.sf.fake_camera ''").await;
-        // Sửa ro.build.characteristics qua build.prop (cần root + remount; ăn sau reboot).
-        let _ = self
+        // Ẩn thư mục Share của MuMu ($MuMu12Shared) và biến thể cũ.
+        let _ = self.adb(idx, "shell for p in /mnt/shared \"/sdcard/\\$MuMu12Shared\" \"/storage/emulated/0/\\$MuMu12Shared\" /sdcard/Android/data/com.microvirt.tools/files; do mountpoint -q \"$p\" && umount \"$p\"; done").await;
+
+        // Giả lập pin: rút sạc AC/USB, set mức pin ngẫu nhiên
+        let mut rng = crate::humanize::Rng::from_entropy();
+        let level = rng.irange(15, 95);
+        let _ = self.adb(idx, &format!("shell dumpsys battery set ac 0; dumpsys battery set usb 0; dumpsys battery set level {level}")).await;
+
+        Ok(())
+    }
+
+    async fn push_resetprop(&self, idx: u32, local_bin: &str) -> AppResult<bool> {
+        let vm = crate::magisk::VM_MAGISK_PATH;
+        // MuMu 12 KHÔNG có binary `su` — adbd chạy root qua `adb root`; chạy lệnh TRỰC TIẾP
+        // (không bọc `su -c`, vốn fail "su: not found" trên build Android 15).
+        let _ = self.adb(idx, "root").await;
+        // Best-effort: push hỏng chớp nhoáng (device offline) → Ok(false), KHÔNG Err (nhất quán
+        // với chmod/verify tolerant; caller coi đây là no-op chứ không hủy provision).
+        if self.adb_args(idx, &["push", local_bin, vm]).await.is_err() {
+            tracing::warn!(idx, "Không push được magisk binary vào VM");
+            return Ok(false);
+        }
+        let _ = self.adb(idx, &format!("shell chmod 755 {vm}")).await;
+        // Verify bằng ĐÚNG tiêu chí resolver ở lock_device_identity dùng (`magisk -c` exit 0),
+        // để hai chỗ không bao giờ bất đồng về "binary chạy được không".
+        let v = self
             .adb(
                 idx,
-                "shell su -c \"mount -o rw,remount /system; sed -i 's/ro.build.characteristics=tablet/ro.build.characteristics=default/' /system/build.prop\"",
+                &format!("shell [ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK"),
             )
-            .await;
-        Ok(())
+            .await
+            .unwrap_or_default();
+        let ok = String::from_utf8_lossy(&v).contains("MOK");
+        if !ok {
+            tracing::warn!(idx, "Đẩy magisk binary nhưng chạy thử (magisk -c) thất bại");
+        }
+        Ok(ok)
     }
 
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool> {
         if hw.build_fingerprint.is_empty() {
             return Ok(false); // hồ sơ cũ chưa có fingerprint → không có gì để khóa
         }
-        // 1) Tìm resetprop (applet Magisk) ở PATH hoặc các vị trí phổ biến.
-        let probe = self
-            .adb(
-                idx,
-                "shell su -c 'command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x \"$p\" ] && echo \"$p\" && break; done'",
-            )
-            .await
-            .unwrap_or_default();
-        let rp = String::from_utf8_lossy(&probe)
-            .lines()
-            .map(str::trim)
-            .rfind(|l| !l.is_empty() && !l.contains("already connected"))
-            .map(|s| s.to_string());
-        let Some(rp) = rp.filter(|s| s == "resetprop" || s.starts_with('/')) else {
+        let vm = crate::magisk::VM_MAGISK_PATH;
+        // MuMu 12 KHÔNG có `su` — adbd chạy root qua `adb root`; mọi lệnh dưới chạy TRỰC TIẾP.
+        let _ = self.adb(idx, "root").await;
+        // Lệnh resetprop: (a) binary magisk MPM đã ĐẨY vào ("<vm> resetprop"), hoặc
+        // (b) resetprop standalone (nếu cài Magisk hệ thống). Không có → no-op.
+        let rp = {
+            let m = self
+                .adb(
+                    idx,
+                    &format!("shell [ -x {vm} ] && {vm} -c >/dev/null 2>&1 && echo MOK"),
+                )
+                .await
+                .unwrap_or_default();
+            if String::from_utf8_lossy(&m).contains("MOK") {
+                Some(format!("{vm} resetprop"))
+            } else {
+                let probe = self
+                    .adb(
+                        idx,
+                        "shell command -v resetprop 2>/dev/null || for p in /data/adb/magisk/resetprop /debug_ramdisk/resetprop /sbin/resetprop; do [ -x $p ] && echo $p && break; done",
+                    )
+                    .await
+                    .unwrap_or_default();
+                String::from_utf8_lossy(&probe)
+                    .lines()
+                    .map(str::trim)
+                    .rfind(|l| !l.is_empty() && !l.contains("already connected"))
+                    .map(|s| s.to_string())
+                    .filter(|s| s == "resetprop" || s.starts_with('/'))
+            }
+        };
+        let Some(rp) = rp else {
             tracing::warn!(
                 idx,
-                "VM chưa có resetprop — bỏ qua khóa model (cần Magisk trong base image)"
+                "VM chưa có resetprop/magisk — bỏ qua khóa model (đặt Magisk APK trong Cài đặt)"
             );
             return Ok(false);
         };
-        // 2) Áp trọn bộ props nhất quán (giá trị bọc nháy kép để chịu khoảng trắng như "Redmi Note 8").
-        let props: [(&str, &str); 6] = [
-            ("ro.product.model", &hw.model),
-            ("ro.product.brand", &hw.brand),
-            ("ro.product.manufacturer", &hw.manufacturer),
-            ("ro.product.device", &hw.device),
-            ("ro.product.name", &hw.device),
-            ("ro.build.fingerprint", &hw.build_fingerprint),
-        ];
-        for (key, val) in props {
-            if val.is_empty() {
-                continue;
-            }
-            let _ = self
-                .adb(idx, &format!("shell su -c '{rp} {key} \"{val}\"'"))
-                .await;
+        // KHÔNG chạy từng `su -c 'resetprop KEY "VAL"'`: value CÓ KHOẢNG TRẮNG (vd
+        // "Redmi Note 8") bị adb-shell tách lại qua 3 tầng sh → resetprop nhận 3 tham số,
+        // model KHÔNG khóa (kiểm chứng thực). Thay vào: SINH script, đẩy vào VM, chạy bằng
+        // `sh <file>` — sh đọc nháy kép TỪ FILE nên value giữ nguyên (kiểm chứng: model
+        // "Redmi Note 8" khóa đúng). `resetprop -f` bị SELinux chặn đọc file → không dùng.
+        let script = build_lock_script(&rp, hw);
+
+        // 1. Xóa các prop đặc trưng của QEMU và MuMu
+        // 2. Set các prop cơ bản của phần cứng
+        // 3. Set các prop để giả mạo Build Type (tránh userdebug/test-keys)
+        // Ẩn ADB (USB debug)
+        // 4. Ẩn các file/device node máy ảo (bằng cách dùng bind mount đè /dev/null lên)
+        let host = std::env::temp_dir().join(format!("mpm-lock-{idx}.sh"));
+        if let Err(e) = fs::write(&host, script.as_bytes()) {
+            tracing::warn!(idx, error = %e, "Không ghi được script khóa model tạm");
+            return Ok(false);
         }
-        // 3) Verify: model runtime đã bằng giá trị ta khóa chưa.
-        Ok(self.prop(idx, "ro.product.model").await == hw.model)
+        let remote = "/data/local/tmp/mpm-lock.sh";
+        let Some(host_str) = host.to_str() else {
+            let _ = fs::remove_file(&host);
+            tracing::warn!(idx, "Duong dan temp script khong phai UTF-8");
+            return Ok(false);
+        };
+        let pushed = self.adb_args(idx, &["push", host_str, remote]).await;
+        let _ = fs::remove_file(&host);
+        if pushed.is_err() {
+            tracing::warn!(idx, "Không đẩy được script khóa model vào VM");
+            return Ok(false);
+        }
+        // Chạy + VERIFY, thử lại 1 lần (adb thi thoảng 'device offline' chớp nhoáng). VERIFY
+        // CẢ model LẪN build.fingerprint: chỉ kiểm model có thể báo "khóa" nhầm khi model ăn
+        // nhưng fingerprint hỏng → đúng cái INCOHERENCE tính năng này ngăn (finding verify).
+        for _ in 0..2 {
+            let _ = self.adb(idx, &format!("shell sh {remote}")).await;
+            let model_ok = self.prop(idx, "ro.product.model").await == hw.model;
+            let fp_ok = self.prop(idx, "ro.build.fingerprint").await == hw.build_fingerprint;
+            let characteristics = self.prop(idx, "ro.build.characteristics").await;
+            let characteristics_ok = if hw.build_characteristics.is_empty() {
+                !characteristics.contains("tablet")
+            } else {
+                characteristics == hw.build_characteristics
+            };
+            if model_ok && fp_ok && characteristics_ok {
+                let _ = self.adb(idx, &format!("shell rm -f {remote}")).await;
+                tracing::info!(idx, model = %hw.model, "Da KHOA model + fingerprint + characteristics qua resetprop (script)");
+                return Ok(true);
+            }
+        }
+        let _ = self.adb(idx, &format!("shell rm -f {remote}")).await;
+        tracing::warn!(idx, model = %hw.model, "Khoa model/fingerprint/characteristics KHONG verify duoc sau 2 lan");
+        Ok(false)
     }
 
     async fn human_tap(&self, idx: u32, x: i32, y: i32) -> AppResult<()> {
@@ -487,16 +917,49 @@ impl AdbWorker for RealAdbWorker {
         .await
         .map(|_| ())
     }
+
+    async fn upload_media(&self, idx: u32, local_path: &str) -> AppResult<()> {
+        // MuMu 12 không có `su` — root qua adb root; lệnh dưới chạy trực tiếp.
+        let _ = self.adb(idx, "root").await;
+        let path = std::path::Path::new(local_path);
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("video.mp4");
+        let remote_name = safe_remote_media_name(name);
+        // Tạo thư mục nếu chưa có
+        let _ = self.adb(idx, "shell mkdir -p /sdcard/DCIM/Camera").await;
+
+        let remote_path = format!("/sdcard/DCIM/Camera/{remote_name}");
+        self.adb_args(idx, &["push", local_path, &remote_path])
+            .await?;
+
+        // Gửi broadcast để hệ điều hành quét lại thư viện media
+        let uri = shell_quote(&format!("file://{remote_path}"));
+        self.adb(
+            idx,
+            &format!(
+                "shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {uri}"
+            ),
+        )
+        .await?;
+
+        tracing::info!(idx, file = %remote_name, "Đã đẩy file media vào VM và quét thư viện");
+        Ok(())
+    }
 }
 
 // ------------------------ Mock (in-memory) ------------------------
 
 /// Mô phỏng thiết bị: giữ "dữ liệu app" theo index trong bộ nhớ. Cho phép test
-/// vòng tròn backup→restore mà không cần MEmu/root.
+/// vòng tròn backup→restore mà không cần MuMu/root.
 pub struct MockAdbWorker {
     devices: Mutex<HashMap<u32, Vec<u8>>>,
     android_ids: Mutex<HashMap<u32, String>>,
+    display_profiles: Mutex<HashMap<u32, (u32, u32, u32)>>,
     locked_models: Mutex<HashMap<u32, String>>,
+    lock_counts: Mutex<HashMap<u32, u32>>,
+    apk_versions: Mutex<HashMap<u32, String>>,
 }
 
 impl MockAdbWorker {
@@ -504,7 +967,10 @@ impl MockAdbWorker {
         Self {
             devices: Mutex::new(HashMap::new()),
             android_ids: Mutex::new(HashMap::new()),
+            display_profiles: Mutex::new(HashMap::new()),
             locked_models: Mutex::new(HashMap::new()),
+            lock_counts: Mutex::new(HashMap::new()),
+            apk_versions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -512,6 +978,21 @@ impl MockAdbWorker {
     #[cfg(test)]
     pub fn locked_model_of(&self, idx: u32) -> Option<String> {
         self.locked_models.lock().unwrap().get(&idx).cloned()
+    }
+
+    #[cfg(test)]
+    pub fn lock_count_of(&self, idx: u32) -> u32 {
+        self.lock_counts
+            .lock()
+            .unwrap()
+            .get(&idx)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub fn display_profile_of(&self, idx: u32) -> Option<(u32, u32, u32)> {
+        self.display_profiles.lock().unwrap().get(&idx).copied()
     }
 
     /// Set dữ liệu app cho một VM (dùng trong test/dev).
@@ -556,7 +1037,7 @@ impl AdbWorker for MockAdbWorker {
         Ok(SnapshotMeta {
             sha256: sha256_file(out)?,
             size_bytes: data.len() as u64,
-            apk_version: "mock-1.0".into(),
+            apk_version: self.apk_version(idx, _pkg).await?,
         })
     }
 
@@ -566,12 +1047,36 @@ impl AdbWorker for MockAdbWorker {
         Ok(())
     }
 
+    async fn apk_version(&self, idx: u32, _pkg: &str) -> AppResult<String> {
+        Ok(self
+            .apk_versions
+            .lock()
+            .unwrap()
+            .get(&idx)
+            .cloned()
+            .unwrap_or_else(|| "mock-1.0".into()))
+    }
+
     async fn apply_android_id(&self, idx: u32, android_id: &str) -> AppResult<()> {
         self.android_ids
             .lock()
             .unwrap()
             .insert(idx, android_id.to_string());
         Ok(())
+    }
+
+    async fn apply_display_profile(
+        &self,
+        idx: u32,
+        width: u32,
+        height: u32,
+        dpi: u32,
+    ) -> AppResult<bool> {
+        self.display_profiles
+            .lock()
+            .unwrap()
+            .insert(idx, (width, height, dpi));
+        Ok(true)
     }
 
     async fn wait_boot_completed(&self, _idx: u32) -> AppResult<()> {
@@ -591,7 +1096,7 @@ impl AdbWorker for MockAdbWorker {
     }
 
     async fn scan_emulator_tells(&self, _idx: u32) -> AppResult<Vec<EmulatorTell>> {
-        // Mẫu khớp thực tế MEmu: chỉ còn native-bridge + hypervisor lộ.
+        // Mẫu khớp thực tế MuMu: chỉ còn native-bridge + hypervisor lộ.
         Ok(vec![
             EmulatorTell {
                 check: "Native Bridge (ARM→x86)".into(),
@@ -619,9 +1124,19 @@ impl AdbWorker for MockAdbWorker {
                 detail: "GPU thật (Adreno/Mali)".into(),
             },
             EmulatorTell {
+                check: "Motion sensors".into(),
+                detected: true,
+                detail: "mock: can chay A.16 tren MuMu that de do accel/gyro/magnetometer".into(),
+            },
+            EmulatorTell {
+                check: "Sensor provider tells".into(),
+                detected: false,
+                detail: "mock".into(),
+            },
+            EmulatorTell {
                 check: "Magisk/resetprop (khóa model)".into(),
                 detected: true,
-                detail: "THIẾU — model bị MEmu ghi đè (cần Magisk trong base image)".into(),
+                detail: "THIẾU — model bị MuMu ghi đè (đặt Magisk APK trong Cài đặt)".into(),
             },
         ])
     }
@@ -630,10 +1145,15 @@ impl AdbWorker for MockAdbWorker {
         Ok(())
     }
 
+    async fn push_resetprop(&self, _idx: u32, _local_bin: &str) -> AppResult<bool> {
+        Ok(false)
+    }
+
     async fn lock_device_identity(&self, idx: u32, hw: &HardwareProfile) -> AppResult<bool> {
         if hw.build_fingerprint.is_empty() {
             return Ok(false);
         }
+        *self.lock_counts.lock().unwrap().entry(idx).or_insert(0) += 1;
         self.locked_models
             .lock()
             .unwrap()
@@ -655,6 +1175,10 @@ impl AdbWorker for MockAdbWorker {
     ) -> AppResult<()> {
         Ok(())
     }
+
+    async fn upload_media(&self, _idx: u32, _local_path: &str) -> AppResult<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -663,6 +1187,70 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("mpm_adb_{}_{tag}.bin", std::process::id()))
+    }
+
+    fn hw_lock() -> HardwareProfile {
+        HardwareProfile {
+            model: "Redmi Note 8".into(),
+            brand: "Redmi".into(),
+            manufacturer: "Xiaomi".into(),
+            imei: "861000000000000".into(),
+            android_id: "a1b2c3d4e5f60718".into(),
+            mac: "02:00:00:11:22:33".into(),
+            res_width: 1080,
+            res_height: 2340,
+            dpi: 440,
+            device: "ginkgo".into(),
+            build_fingerprint:
+                "Redmi/ginkgo/ginkgo:11/RP1A.200720.011/V12.5.1.0.RCOMIXM:user/release-keys".into(),
+            soc_hardware: "qcom".into(),
+            board_platform: "trinket".into(),
+            gpu_egl: "adreno".into(),
+            security_patch: "2021-05-01".into(),
+            build_characteristics: "".into(),
+        }
+    }
+
+    #[test]
+    fn normalize_apk_version_bo_nhieu_mumumanager() {
+        // Nhiễu MuMuManager ("already connected...") KHÔNG được lọt vào version (bug thật đã gặp).
+        assert_eq!(normalize_apk_version("    versionName=40.0.0"), "40.0.0");
+        assert_eq!(
+            normalize_apk_version("already connected to 127.0.0.1:21513 versionName=40.0.0"),
+            "40.0.0"
+        );
+        assert_eq!(
+            normalize_apk_version("already connected to 127.0.0.1:21513\n    versionName=40.0.0"),
+            "40.0.0"
+        );
+        // Không có "versionName=" (vd mock) → giữ nguyên để so sánh mock vẫn phát hiện lệch.
+        assert_eq!(normalize_apk_version("mock-1.0"), "mock-1.0");
+        assert_eq!(normalize_apk_version(""), "");
+    }
+
+    #[test]
+    fn build_lock_script_giu_gia_tri_co_khoang_trang_va_coherent() {
+        let s = build_lock_script("magisk resetprop", &hw_lock());
+        assert!(
+            s.contains("magisk resetprop ro.product.model 'Redmi Note 8'"),
+            "{s}"
+        );
+        assert!(s.contains("magisk resetprop ro.hardware 'qcom'"));
+        assert!(s.contains("magisk resetprop ro.board.platform 'trinket'"));
+        assert!(s.contains("magisk resetprop ro.hardware.egl 'adreno'"));
+        assert!(s.contains("magisk resetprop ro.build.version.security_patch '2021-05-01'"));
+        assert!(s.contains("magisk resetprop --delete ro.build.characteristics"));
+        assert!(!s.contains("tablet"), "khong duoc de lai tell tablet");
+
+        let hw_empty = HardwareProfile {
+            soc_hardware: String::new(),
+            ..hw_lock()
+        };
+        let s2 = build_lock_script("resetprop", &hw_empty);
+        assert!(
+            !s2.contains("resetprop ro.hardware '"),
+            "rong phai bo qua, khong set"
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import { MonitorSmartphone, Plus, RefreshCw, ServerCrash } from 'lucide-react';
 import { useProfileStore } from '@/store/useProfileStore';
 import { getBackend } from '@/lib';
@@ -19,6 +20,7 @@ export function ProfilesView() {
   const [editProfile, setEditProfile] = useState<ProfileView | null>(null);
   const [fpState, setFpState] = useState<{ name: string; view: ProfileView } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProfileView | null>(null);
+  const [uploadingSet, setUploadingSet] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const filtered = useMemo(() => {
@@ -44,7 +46,15 @@ export function ProfilesView() {
     toast.info(`Đang cấp VM & chạy "${username}"…`);
     void withBusy(username, () =>
       run(username)
-        .then((vm) => toast.success(`"${username}" đang chạy trên VM #${vm}`))
+        .then((result) => {
+          toast.success(`"${username}" đang chạy trên VM #${result.vmIndex}`);
+          if (result.health.fingerprintLock.attempted && !result.health.fingerprintLock.locked) {
+            toast.error(`Fingerprint chưa khóa: ${result.health.fingerprintLock.message}`);
+          }
+          if (result.health.fixableTells.length > 0) {
+            toast.error(`Tell sửa được còn lộ: ${result.health.fixableTells.join(', ')}`);
+          }
+        })
         .catch((e: unknown) => toast.error(`Chạy lỗi: ${e instanceof Error ? e.message : e}`)),
     );
   };
@@ -84,6 +94,36 @@ export function ProfilesView() {
       .catch((e: unknown) =>
         toast.error(`Không bắt đầu được phiên: ${e instanceof Error ? e.message : e}`),
       );
+  };
+
+  const doUploadVideo = async (view: ProfileView) => {
+    if (view.runningVm == null) return;
+    try {
+      let selected: string | string[] | null = null;
+      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+        selected = await open({
+          title: 'Chọn file video (MP4, MOV, v.v.)',
+          filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'avi', 'mkv', 'webm'] }],
+          multiple: false,
+        });
+      } else {
+        selected = 'C:\\mock\\test_video.mp4';
+      }
+      if (selected === null || typeof selected !== 'string') return;
+
+      setUploadingSet((prev) => new Set(prev).add(view.profile.username));
+      toast.info(`Đang đưa video vào máy ảo "${view.profile.username}"…`);
+      await getBackend().uploadVideoToVm(view.runningVm, selected);
+      toast.success(`Đã đưa video vào VM thành công! Bạn có thể mở ứng dụng TikTok để đăng.`);
+    } catch (e: unknown) {
+      toast.error(`Lỗi chuyển video: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setUploadingSet((prev) => {
+        const next = new Set(prev);
+        next.delete(view.profile.username);
+        return next;
+      });
+    }
   };
 
   return (
@@ -137,20 +177,30 @@ export function ProfilesView() {
                 key={view.profile.username}
                 view={view}
                 busy={busy.has(view.profile.username)}
+                isUploading={uploadingSet.has(view.profile.username)}
                 onRun={doRun}
                 onStop={doStop}
                 onEdit={(v) => setEditProfile(v)}
                 onViewFingerprint={(v) => setFpState({ name: v.profile.username, view: v })}
                 onScanEmulator={doScanEmulator}
                 onRunSession={doRunSession}
+                onUploadVideo={doUploadVideo}
                 onDelete={(v) => setPendingDelete(v)}
                 onUpdateNote={(username, note) => {
                   const p = profiles.find((x) => x.profile.username === username)?.profile;
-                  if (p) void update(username, p.account, note, p.country);
+                  if (p) {
+                    void update(username, p.account, note, p.country).catch((e: unknown) =>
+                      toast.error(`Lưu ghi chú lỗi: ${e instanceof Error ? e.message : e}`),
+                    );
+                  }
                 }}
                 onUpdateCountry={(username, country) => {
                   const p = profiles.find((x) => x.profile.username === username)?.profile;
-                  if (p) void update(username, p.account, p.note, country);
+                  if (p) {
+                    void update(username, p.account, p.note, country).catch((e: unknown) =>
+                      toast.error(`Lưu quốc gia lỗi: ${e instanceof Error ? e.message : e}`),
+                    );
+                  }
                 }}
               />
             ))}
@@ -162,11 +212,15 @@ export function ProfilesView() {
       <CreateInstanceDialog
         open={createOpen}
         onCancel={() => setCreateOpen(false)}
-        onSubmit={(account, note, country) => {
-          void create(account, note, country)
-            .then(() => toast.success(`Đã tạo profile "${account.tiktokUsername}"`))
-            .catch((e: unknown) => toast.error(`Tạo lỗi: ${e instanceof Error ? e.message : e}`));
-          setCreateOpen(false);
+        onSubmit={async (account, note, country) => {
+          try {
+            await create(account, note, country);
+            toast.success(`Đã tạo profile "${account.tiktokUsername}"`);
+            setCreateOpen(false);
+          } catch (e: unknown) {
+            toast.error(`Tạo lỗi: ${e instanceof Error ? e.message : e}`);
+            throw e;
+          }
         }}
       />
 
@@ -184,13 +238,17 @@ export function ProfilesView() {
             : null
         }
         onCancel={() => setEditProfile(null)}
-        onSubmit={(account: AccountProfile, note, country) => {
-          if (editProfile) {
-            void update(editProfile.profile.username, account, note, country)
-              .then(() => toast.success(`Đã lưu "${editProfile.profile.username}"`))
-              .catch((e: unknown) => toast.error(`Lưu lỗi: ${e instanceof Error ? e.message : e}`));
+        onSubmit={async (account: AccountProfile, note, country) => {
+          if (!editProfile) return;
+          const username = editProfile.profile.username;
+          try {
+            await update(username, account, note, country);
+            toast.success(`Đã lưu "${username}"`);
+            setEditProfile(null);
+          } catch (e: unknown) {
+            toast.error(`Lưu lỗi: ${e instanceof Error ? e.message : e}`);
+            throw e;
           }
-          setEditProfile(null);
         }}
       />
 
@@ -204,7 +262,7 @@ export function ProfilesView() {
       <ConfirmDialog
         open={pendingDelete !== null}
         title={`Xóa profile "${pendingDelete?.profile.username}"?`}
-        description="Xóa tài khoản khỏi danh sách. Nếu đang chạy sẽ backup + hủy VM trước. Snapshot session vẫn giữ."
+        description="Xóa tài khoản khỏi danh sách. Nếu đang chạy sẽ backup + hủy VM trước. Snapshot session của profile này cũng được dọn khỏi kho lưu trữ."
         confirmLabel="Xóa profile"
         danger
         onCancel={() => setPendingDelete(null)}

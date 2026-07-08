@@ -7,13 +7,15 @@ use std::collections::HashSet;
 use std::fs;
 
 use crate::error::{AppError, AppResult};
-use crate::model::{HardwareProfile, SnapshotMeta, SnapshotRecord, DEFAULT_BLOAT, TIKTOK_PKG};
+use crate::model::{
+    FingerprintLockStatus, HardwareProfile, SnapshotMeta, SnapshotRecord, DEFAULT_BLOAT, TIKTOK_PKG,
+};
 use crate::state::{now_ms, SharedState};
 
-/// Tập index VM hiện có (từ memuc).
+/// Tập index VM hiện có (từ emulator).
 async fn index_set(state: &SharedState) -> AppResult<HashSet<u32>> {
     Ok(state
-        .memuc
+        .emulator
         .list_instances()
         .await?
         .into_iter()
@@ -22,15 +24,24 @@ async fn index_set(state: &SharedState) -> AppResult<HashSet<u32>> {
 }
 
 /// Nhận diện index VM **mới** = index xuất hiện sau khi tạo mà trước đó chưa có.
-/// Đáng tin hơn `max(index)` vì memuc có thể **tái dùng** index đã xóa (lấp khoảng
+/// Đáng tin hơn `max(index)` vì emulator có thể **tái dùng** index đã xóa (lấp khoảng
 /// trống), khiến max() trỏ nhầm sang VM khác.
 async fn identify_new(state: &SharedState, before: &HashSet<u32>) -> AppResult<u32> {
-    index_set(state)
+    let mut created: Vec<u32> = index_set(state)
         .await?
         .difference(before)
         .copied()
-        .max()
-        .ok_or_else(|| AppError::CommandFailed("Không xác định được VM vừa tạo".into()))
+        .collect();
+    created.sort_unstable();
+    match created.as_slice() {
+        [idx] => Ok(*idx),
+        [] => Err(AppError::CommandFailed(
+            "Không xác định được VM vừa tạo".into(),
+        )),
+        many => Err(AppError::CommandFailed(format!(
+            "Có nhiều VM mới xuất hiện sau create ({many:?}); không đoán index để tránh đụng nhầm VM"
+        ))),
+    }
 }
 
 /// Tạo một VM mới và trả về index của nó (an toàn với tái dùng index + đua tranh).
@@ -38,7 +49,7 @@ async fn identify_new(state: &SharedState, before: &HashSet<u32>) -> AppResult<u
 pub async fn create_vm(state: &SharedState) -> AppResult<u32> {
     let _guard = state.create_lock.lock().await;
     let before = index_set(state).await?;
-    state.queue.run(state.memuc.create()).await?;
+    state.queue.run(state.emulator.create()).await?;
     identify_new(state, &before).await
 }
 
@@ -51,20 +62,111 @@ async fn auto_debloat(state: &SharedState, index: u32) {
     let _ = state.adb.harden(index).await;
 }
 
-/// Áp toàn bộ cấu hình phần cứng (fingerprint) vào VM: các khoá setconfigex +
+fn is_fixable_tell(check: &str) -> bool {
+    !check.contains("Native Bridge")
+        && !check.contains("hypervisor")
+        && !check.contains("Motion sensors")
+        && !check.contains("Sensor provider")
+        // "Magisk/resetprop" đã được phản ánh qua fingerprint_lock → loại khỏi fixable_tells
+        // để tránh 2 toast cùng nguyên nhân khi chưa cấu hình Magisk.
+        && !check.contains("Magisk/resetprop")
+}
+
+async fn record_final_health_scan(state: &SharedState, index: u32) {
+    match state.adb.scan_emulator_tells(index).await {
+        Ok(tells) => {
+            let fixable = tells
+                .into_iter()
+                .filter(|tell| tell.detected && is_fixable_tell(&tell.check))
+                .map(|tell| tell.check)
+                .collect();
+            state.set_fixable_tells(index, fixable).await;
+        }
+        Err(e) => {
+            tracing::warn!(index, error = %e, "Khong scan duoc final provision health");
+            state
+                .set_fixable_tells(index, vec!["scan_emulator_tells_failed".into()])
+                .await;
+        }
+    }
+}
+
+/// Áp toàn bộ cấu hình phần cứng (fingerprint) vào VM: các khoá MuMu `simulation` +
 /// **độ phân giải/DPI** (cửa sổ VM mặc định khớp thiết bị fake). android_id áp riêng (adb).
 pub async fn apply_hw_config(
     state: &SharedState,
     index: u32,
     hw: &HardwareProfile,
 ) -> AppResult<()> {
-    for (key, value) in hw.memuc_pairs() {
-        state.memuc.set_config(index, key, &value).await?;
+    for (key, value) in hw.emulator_pairs() {
+        state.emulator.set_config(index, key, &value).await?;
     }
     state
-        .memuc
+        .emulator
         .set_resolution(index, hw.res_width, hw.res_height, hw.dpi)
         .await?;
+    Ok(())
+}
+
+/// Re-apply runtime identity after Android boot and after install/restore mutations.
+async fn reassert_runtime_fingerprint(
+    state: &SharedState,
+    index: u32,
+    hw: &HardwareProfile,
+    require_android_id: bool,
+) -> AppResult<()> {
+    match state
+        .adb
+        .apply_display_profile(index, hw.res_width, hw.res_height, hw.dpi)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            index,
+            width = hw.res_width,
+            height = hw.res_height,
+            dpi = hw.dpi,
+            "Khong verify duoc wm size/density theo profile"
+        ),
+        Err(e) => tracing::warn!(
+            index,
+            error = %e,
+            "Khong apply duoc wm size/density runtime"
+        ),
+    }
+
+    if require_android_id {
+        state.adb.apply_android_id(index, &hw.android_id).await?;
+    } else if let Err(e) = state.adb.apply_android_id(index, &hw.android_id).await {
+        tracing::warn!(
+            index,
+            error = %e,
+            "Khong re-apply duoc android_id runtime"
+        );
+    }
+
+    let fingerprint_lock = match state.adb.lock_device_identity(index, hw).await {
+        Ok(true) => FingerprintLockStatus::locked(),
+        Ok(false) => {
+            tracing::warn!(
+                index,
+                "Chua khoa duoc ro.product/build fingerprint bang resetprop"
+            );
+            FingerprintLockStatus::missing_magisk()
+        }
+        Err(e) => {
+            tracing::warn!(
+                index,
+                error = %e,
+                "Khong re-apply duoc ro.product/build fingerprint"
+            );
+            FingerprintLockStatus::failed(e)
+        }
+    };
+    state
+        .set_fingerprint_lock_status(index, fingerprint_lock)
+        .await;
+
     Ok(())
 }
 
@@ -96,11 +198,21 @@ pub async fn backup_and_record(
             size_bytes: stored.size_bytes,
             apk_version: adb_meta.apk_version.clone(),
         };
-        db.record_snapshot(account_key, &storage_key, &meta, created)?;
-        for old_key in db.snapshots_beyond(account_key, SNAPSHOT_RETENTION)? {
-            let _ = state.store.delete(&old_key).await;
+        if let Err(e) = db.record_snapshot(account_key, &storage_key, &meta, created) {
+            let _ = state.store.delete(&storage_key).await;
+            return Err(e.into());
         }
-        db.prune_snapshots(account_key, SNAPSHOT_RETENTION)?;
+        for old_key in db.snapshots_beyond(account_key, SNAPSHOT_RETENTION)? {
+            match state.store.delete(&old_key).await {
+                Ok(()) => db.delete_snapshot_key(&old_key)?,
+                Err(e) => tracing::warn!(
+                    account_key,
+                    old_key = %old_key,
+                    error = %e,
+                    "Không xóa được blob snapshot cũ; giữ row để retry"
+                ),
+            }
+        }
     }
 
     Ok(SnapshotRecord {
@@ -128,6 +240,7 @@ pub async fn provision(
 ) -> AppResult<u32> {
     // 1) Tạo VM mới tinh và xác định index của nó (an toàn tái dùng index/đua tranh).
     let index = create_vm(state).await?;
+    state.record_running_marker(account_key, index);
 
     // 2..4) Chuẩn bị VM. NGUYÊN TỬ: nếu BẤT KỲ bước nào lỗi → HỦY VM vừa tạo. VM đã
     // được tạo nhưng CHƯA trả về caller nên không ai teardown được nó — nếu không dọn
@@ -136,9 +249,10 @@ pub async fn provision(
     match provision_prepare(state, index, account_key, hw, apk_path).await {
         Ok(()) => Ok(index),
         Err(e) => {
-            let _ = state.memuc.stop(index).await;
-            let _ = state.memuc.remove(index).await;
+            let _ = state.emulator.stop(index).await;
+            let _ = state.emulator.remove(index).await;
             state.forget(index).await;
+            state.clear_running_marker(account_key);
             Err(e)
         }
     }
@@ -158,40 +272,75 @@ async fn provision_prepare(
     apply_hw_config(state, index, hw).await?;
 
     // Start → chờ boot → áp android_id → gỡ app thừa mặc định.
-    state.queue.run(state.memuc.start(index)).await?;
+    state.queue.run(state.emulator.start(index)).await?;
     state.mark_launched(index).await;
     state.adb.wait_boot_completed(index).await?;
-    state.adb.apply_android_id(index, &hw.android_id).await?;
-    // Khóa model post-boot (chống MEmu random ro.product.model). Best-effort — cần
-    // resetprop trên VM (Magisk trong base image); no-op nếu chưa có.
-    let _ = state.adb.lock_device_identity(index, hw).await;
+    // Đẩy binary magisk (resetprop) vào VM nếu người dùng đã cấu hình Magisk APK —
+    // VM disposable nên đẩy mỗi lần provision. Sau đó khóa model post-boot (chống MuMu
+    // random ro.product.model). Best-effort — no-op nếu chưa có Magisk APK.
+    if let Some(bin) = state.magisk_bin() {
+        let _ = state
+            .adb
+            .push_resetprop(index, &bin.to_string_lossy())
+            .await;
+    }
+    reassert_runtime_fingerprint(state, index, hw, true).await?;
     auto_debloat(state, index).await;
+
+    let mut needs_final_reassert = false;
 
     // Cài TikTok TRƯỚC restore (pkg phải tồn tại để restore ghi /data/data/<pkg>).
     // Idempotent (`install_apk -r`). Bắt buộc thành công cho luồng profile.
     if let Some(apk) = apk_path {
         state.adb.install_apk(index, apk).await?;
+        needs_final_reassert = true;
     }
 
     // Restore snapshot mới nhất nếu có (verify sha256 trước).
     if let Some(db) = &state.db {
         if let Some(rec) = db.latest_snapshot(account_key)? {
-            if state.store.verify(&rec.storage_key, &rec.sha256).await? {
-                let tmp =
-                    std::env::temp_dir().join(format!("mpm-prov-{index}-{}.tar.zst", now_ms()));
-                // Dọn tmp MỌI nhánh (get/restore lỗi cũng không rò file tạm).
-                let res = async {
-                    state.store.get(&rec.storage_key, &tmp).await?;
-                    state.adb.restore(index, TIKTOK_PKG, &tmp).await
-                }
-                .await;
-                let _ = fs::remove_file(&tmp);
-                res?;
-            } else {
-                tracing::warn!(account_key, "Snapshot hỏng — provision không restore");
+            if !state.store.verify(&rec.storage_key, &rec.sha256).await? {
+                return Err(AppError::CommandFailed(format!(
+                    "Snapshot mới nhất của {account_key} hỏng hoặc sai checksum — không chạy VM để tránh mất session"
+                )));
             }
+
+            if let Some(expected) = rec
+                .apk_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty() && *v != "unknown")
+            {
+                let actual = state.adb.apk_version(index, TIKTOK_PKG).await?;
+                // Chuẩn hóa CẢ HAI phía: record snapshot cũ có thể lưu version dính nhiễu
+                // MuMuManager ("already connected... versionName=X") → so version THỰC, không chuỗi thô.
+                if crate::adb::normalize_apk_version(&actual)
+                    != crate::adb::normalize_apk_version(expected)
+                {
+                    return Err(AppError::CommandFailed(format!(
+                        "APK TikTok lệch phiên bản: snapshot={expected}, vm={actual}. Từ chối restore để tránh hỏng dữ liệu app"
+                    )));
+                }
+            }
+
+            let tmp = std::env::temp_dir().join(format!("mpm-prov-{index}-{}.tar.zst", now_ms()));
+            // Dọn tmp MỌI nhánh (get/restore lỗi cũng không rò file tạm).
+            let res = async {
+                state.store.get(&rec.storage_key, &tmp).await?;
+                state.adb.restore(index, TIKTOK_PKG, &tmp).await
+            }
+            .await;
+            let _ = fs::remove_file(&tmp);
+            res?;
+            needs_final_reassert = true;
         }
     }
+
+    if needs_final_reassert {
+        reassert_runtime_fingerprint(state, index, hw, false).await?;
+    }
+
+    record_final_health_scan(state, index).await;
 
     Ok(())
 }
@@ -209,13 +358,14 @@ pub async fn teardown(
     // 2) Hủy VM. stop best-effort; remove có thể chập chờn (VM chưa dừng hẳn) → thử
     // lại 1 lần sau khi stop. Nếu vẫn lỗi → trả Err: caller (profile stop/delete) sẽ
     // TÁI theo dõi VM để người dùng thử lại, không để VM mồ côi vô chủ.
-    let _ = state.memuc.stop(index).await;
-    if let Err(e) = state.memuc.remove(index).await {
+    let _ = state.emulator.stop(index).await;
+    if let Err(e) = state.emulator.remove(index).await {
         tracing::warn!(index, error = %e, "remove VM lỗi — thử lại sau khi stop");
-        let _ = state.memuc.stop(index).await;
-        state.memuc.remove(index).await?;
+        let _ = state.emulator.stop(index).await;
+        state.emulator.remove(index).await?;
     }
     state.forget(index).await;
+    state.clear_running_marker(account_key);
 
     Ok(record)
 }
@@ -223,8 +373,8 @@ pub async fn teardown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::emulator::MockClient;
     use crate::geo::MockGeolocator;
-    use crate::memuc::{MemucClient, MockMemuc};
     use crate::snapshot::LocalSnapshotStore;
     use crate::state::AppState;
     use crate::{adb::MockAdbWorker, db::Db, model::AppSettings};
@@ -245,25 +395,30 @@ mod tests {
             device: "frd".into(),
             build_fingerprint: "HUAWEI/FRD-L19/HWFRD:8.0.0/HUAWEIFRD-L19/380C431:user/release-keys"
                 .into(),
+            soc_hardware: "kirin950".into(),
+            board_platform: "hi3650".into(),
+            gpu_egl: "mali".into(),
+            security_patch: "2018-01-01".into(),
+            build_characteristics: "".into(),
         }
     }
 
-    fn make_state(tag: &str) -> (SharedState, Arc<MockMemuc>, Arc<MockAdbWorker>) {
+    fn make_state(tag: &str) -> (SharedState, Arc<MockClient>, Arc<MockAdbWorker>) {
         make_state_geo(tag, Arc::new(MockGeolocator))
     }
 
     fn make_state_geo(
         tag: &str,
         geo: Arc<dyn crate::geo::IpGeolocator>,
-    ) -> (SharedState, Arc<MockMemuc>, Arc<MockAdbWorker>) {
-        let memuc = Arc::new(MockMemuc::new());
+    ) -> (SharedState, Arc<MockClient>, Arc<MockAdbWorker>) {
+        let emulator = Arc::new(MockClient::new());
         let adb = Arc::new(MockAdbWorker::new());
         let dir = std::env::temp_dir().join(format!("mpm_orch_{}_{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(LocalSnapshotStore::new(dir.join("snap"), Some([5u8; 32])).unwrap());
         let db = Db::open_with_key(&dir.join("mpm.db"), None).unwrap();
         let state: SharedState = Arc::new(AppState::new(
-            memuc.clone(),
+            emulator.clone(),
             geo,
             adb.clone(),
             store,
@@ -271,20 +426,7 @@ mod tests {
             Some(db),
             HashMap::new(),
         ));
-        (state, memuc, adb)
-    }
-
-    #[tokio::test]
-    async fn create_vm_nhan_dien_dung_khi_tai_dung_index() {
-        // Mock bắt đầu {0,1}. Xóa 0 → còn {1}. Tạo mới → memuc TÁI DÙNG index 0.
-        // Phải nhận diện đúng index mới (0) bằng phép hiệu tập, KHÔNG phải max (1).
-        let (state, memuc, _adb) = make_state("reuse");
-        memuc.remove(0).await.unwrap();
-        let idx = create_vm(&state).await.unwrap();
-        assert_eq!(
-            idx, 0,
-            "phải nhận diện index tái dùng (0), không phải max (1)"
-        );
+        (state, emulator, adb)
     }
 
     #[tokio::test]
@@ -301,30 +443,62 @@ mod tests {
 
     #[tokio::test]
     async fn provision_ap_hardware_va_android_id() {
-        let (state, memuc, adb) = make_state("hw");
+        let (state, emulator, adb) = make_state("hw");
         let idx = provision(&state, "acc1", &hw(), None).await.unwrap();
 
-        // Config phần cứng được áp qua memuc.
+        // Config phần cứng đi qua EmulatorClient; android_id áp riêng qua adb.
         assert_eq!(
-            memuc.config_value(idx, "imei").as_deref(),
+            emulator.config_value(idx, "imei").await.as_deref(),
             Some("860504493831119")
         );
         assert_eq!(
-            memuc.config_value(idx, "microvirt_vm_model").as_deref(),
+            emulator.config_value(idx, "model").await.as_deref(),
             Some("FRD-L19")
         );
         assert_eq!(
-            memuc.config_value(idx, "custom_resolution").as_deref(),
-            Some("1080 1920 320")
+            emulator.config_value(idx, "manufacturer").await.as_deref(),
+            Some("HUAWEI")
         );
-        assert_eq!(memuc.config_value(idx, "enable_su").as_deref(), Some("1"));
-        // android_id áp qua adb.
+        assert_eq!(
+            emulator.config_value(idx, "brand").await.as_deref(),
+            Some("HUAWEI")
+        );
+        assert_eq!(
+            emulator.config_value(idx, "mac_address").await.as_deref(),
+            Some("02:00:00:11:22:33")
+        );
         assert_eq!(adb.android_id_of(idx).as_deref(), Some("a1b2c3d4e5f6"));
+        assert_eq!(adb.display_profile_of(idx), Some((1080, 1920, 320)));
+        assert_eq!(
+            adb.lock_count_of(idx),
+            1,
+            "provision khong cai/restore chi can khoa fingerprint mot lan sau boot"
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_reassert_fingerprint_sau_cai_apk() {
+        let (state, _emulator, adb) = make_state("reassert_install");
+        let idx = provision(&state, "acc_install", &hw(), Some("TikTok.apk"))
+            .await
+            .unwrap();
+
+        assert_eq!(adb.display_profile_of(idx), Some((1080, 1920, 320)));
+        assert_eq!(
+            adb.android_id_of(idx).as_deref(),
+            Some("a1b2c3d4e5f6"),
+            "android_id duoc re-apply sau install"
+        );
+        assert_eq!(
+            adb.lock_count_of(idx),
+            2,
+            "provision phai re-assert resetprop sau install de chong MuMu/GMS ghi de muon"
+        );
     }
 
     #[tokio::test]
     async fn vong_doi_provision_teardown_provision_giu_du_lieu() {
-        let (state, _memuc, adb) = make_state("cycle");
+        let (state, _emulator, adb) = make_state("cycle");
 
         // Phiên 1: cấp phát, ghi dữ liệu, kết thúc (backup + hủy).
         let idx1 = provision(&state, "acc1", &hw(), None).await.unwrap();
@@ -332,7 +506,7 @@ mod tests {
         teardown(&state, idx1, "acc1").await.unwrap();
 
         // VM đã bị hủy.
-        let list = state.memuc.list_instances().await.unwrap();
+        let list = state.emulator.list_instances().await.unwrap();
         assert!(list.iter().all(|v| v.index != idx1), "VM phải bị hủy");
 
         // Xóa sạch dữ liệu thiết bị mô phỏng → mọi dữ liệu ở phiên 2 CHỈ có thể
@@ -345,13 +519,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provision_tu_choi_snapshot_sai_checksum() {
+        let (state, _m, _adb) = make_state("bad_sha");
+        let before: std::collections::HashSet<u32> = state
+            .emulator
+            .list_instances()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.index)
+            .collect();
+
+        let raw = std::env::temp_dir().join(format!("mpm-bad-sha-{}.tar", std::process::id()));
+        fs::write(&raw, b"session").unwrap();
+        let stored = state.store.put("acc_bad/1.tar.zst", &raw).await.unwrap();
+        let _ = fs::remove_file(&raw);
+        let db = state.db.as_ref().unwrap();
+        db.record_snapshot(
+            "acc_bad",
+            "acc_bad/1.tar.zst",
+            &SnapshotMeta {
+                sha256: "0".repeat(64),
+                size_bytes: stored.size_bytes,
+                apk_version: "mock-1.0".into(),
+            },
+            now_ms(),
+        )
+        .unwrap();
+
+        let err = provision(&state, "acc_bad", &hw(), None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("sai checksum"),
+            "lỗi phải nói rõ checksum: {err}"
+        );
+        let after: std::collections::HashSet<u32> = state
+            .emulator
+            .list_instances()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.index)
+            .collect();
+        assert_eq!(after, before, "provision lỗi phải dọn VM vừa tạo");
+    }
+
+    #[tokio::test]
+    async fn provision_tu_choi_restore_khi_apk_version_lech() {
+        let (state, _m, _adb) = make_state("apk_mismatch");
+        let before: std::collections::HashSet<u32> = state
+            .emulator
+            .list_instances()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.index)
+            .collect();
+
+        let raw = std::env::temp_dir().join(format!("mpm-apk-mismatch-{}.tar", std::process::id()));
+        fs::write(&raw, b"session").unwrap();
+        let stored = state.store.put("acc_apk/1.tar.zst", &raw).await.unwrap();
+        let _ = fs::remove_file(&raw);
+        let db = state.db.as_ref().unwrap();
+        db.record_snapshot(
+            "acc_apk",
+            "acc_apk/1.tar.zst",
+            &SnapshotMeta {
+                sha256: stored.sha256,
+                size_bytes: stored.size_bytes,
+                apk_version: "mock-2.0".into(),
+            },
+            now_ms(),
+        )
+        .unwrap();
+
+        let err = provision(&state, "acc_apk", &hw(), None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("APK TikTok lệch phiên bản"),
+            "lỗi phải chặn version mismatch: {err}"
+        );
+        let after: std::collections::HashSet<u32> = state
+            .emulator
+            .list_instances()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|i| i.index)
+            .collect();
+        assert_eq!(after, before, "provision lỗi phải dọn VM vừa tạo");
+    }
+
+    #[tokio::test]
     async fn provision_don_dep_vm_khi_buoc_sau_create_loi() {
         // NGUYÊN TỬ: provision cài APK (Some path bịa) — MockAdb.install_apk ok, nên
         // đường lỗi ở đây khó kích. Thay vào đó kiểm luồng thành công không rò VM:
         // provision → teardown → tập index trở lại như trước.
         let (state, _m, _adb) = make_state("atomic");
         let before: std::collections::HashSet<u32> = state
-            .memuc
+            .emulator
             .list_instances()
             .await
             .unwrap()
@@ -362,7 +626,7 @@ mod tests {
         assert!(!before.contains(&idx), "provision tạo VM mới");
         teardown(&state, idx, "acc_atom").await.unwrap();
         let after: std::collections::HashSet<u32> = state
-            .memuc
+            .emulator
             .list_instances()
             .await
             .unwrap()

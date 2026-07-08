@@ -19,7 +19,13 @@ const MENU_WIDTH = 190;
  * Menu phụ (⋮). Render qua portal + vị trí fixed để không bị cắt bởi container
  * có overflow. Đóng khi bấm ra ngoài hoặc nhấn Escape.
  */
-export function DropdownMenu({ items, label = 'Thêm thao tác' }: { items: MenuItem[]; label?: string }) {
+export function DropdownMenu({
+  items,
+  label = 'Thêm thao tác',
+}: {
+  items: MenuItem[];
+  label?: string;
+}) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, left: 0 });
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -80,9 +86,7 @@ export function DropdownMenu({ items, label = 'Thêm thao tác' }: { items: Menu
                   className={cn(
                     'flex w-full items-center gap-2.5 rounded-md px-3 py-2 text-left text-sm transition-colors',
                     'disabled:opacity-40 disabled:pointer-events-none',
-                    item.danger
-                      ? 'text-danger hover:bg-danger/10'
-                      : 'text-fg hover:bg-surface-2',
+                    item.danger ? 'text-danger hover:bg-danger/10' : 'text-fg hover:bg-surface-2',
                   )}
                 >
                   {item.icon && <span className="shrink-0">{item.icon}</span>}

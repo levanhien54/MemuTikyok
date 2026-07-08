@@ -1,7 +1,9 @@
 import { AnimatePresence, motion } from 'framer-motion';
+import { useRef } from 'react';
 import { Fingerprint, Copy, X } from 'lucide-react';
 import type { HardwareProfile } from '@/types/instance';
 import { Button } from '@/components/ui/Button';
+import { useModalFocusTrap } from '@/components/ui/useModalFocusTrap';
 import { toast } from '@/store/useToastStore';
 
 interface Props {
@@ -42,6 +44,9 @@ function Row({ label, value }: { label: string; value: string }) {
  * dữ liệu đã lưu (getHardware) — hiển thị nguyên vẹn để đối chiếu/copy.
  */
 export function FingerprintDialog({ open, accountName, hardware, onClose }: Props) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useModalFocusTrap(open, dialogRef, onClose);
+
   return (
     <AnimatePresence>
       {open && (
@@ -53,9 +58,11 @@ export function FingerprintDialog({ open, accountName, hardware, onClose }: Prop
           onClick={onClose}
         >
           <motion.div
+            ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-label={`Fingerprint của ${accountName}`}
+            tabIndex={-1}
             className="w-full max-w-md rounded-lg border border-border bg-surface p-6 shadow-soft"
             initial={{ scale: 0.96, y: 10 }}
             animate={{ scale: 1, y: 0 }}
@@ -93,7 +100,9 @@ export function FingerprintDialog({ open, accountName, hardware, onClose }: Prop
                   <Row label="Model" value={hardware.model} />
                   <Row label="Hãng (brand)" value={hardware.brand} />
                   <Row label="Nhà sản xuất" value={hardware.manufacturer} />
-                  {hardware.device ? <Row label="Device (codename)" value={hardware.device} /> : null}
+                  {hardware.device ? (
+                    <Row label="Device (codename)" value={hardware.device} />
+                  ) : null}
                   <Row label="IMEI" value={hardware.imei} />
                   <Row label="Android ID" value={hardware.androidId} />
                   <Row label="MAC" value={hardware.mac} />
@@ -108,8 +117,8 @@ export function FingerprintDialog({ open, accountName, hardware, onClose }: Prop
                 </div>
                 <p className="mt-3 text-[11px] leading-snug text-fg-muted">
                   ⚠️ Đây là fingerprint <b>đã lưu</b> cho tài khoản (áp khi khởi chạy). Riêng
-                  <b> model</b> có thể bị MEmu ghi đè ngẫu nhiên khi VM boot — android_id & độ
-                  phân giải là các trường thực sự có hiệu lực.
+                  <b> model</b> có thể bị MuMu ghi đè ngẫu nhiên khi VM boot — android_id & độ phân
+                  giải là các trường thực sự có hiệu lực.
                 </p>
               </>
             )}

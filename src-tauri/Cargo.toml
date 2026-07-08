@@ -1,7 +1,7 @@
 [package]
-name = "memu-play-manager"
+name = "mumu-play-manager"
 version = "0.1.0"
-description = "MEmu Play Manager — quản lý fleet máy ảo MEmu Play"
+description = "MuMu Play Manager — quản lý fleet máy ảo MuMu Player 12"
 authors = ["MPM Team"]
 edition = "2021"
 rust-version = "1.77"
@@ -15,7 +15,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-log = "2"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -28,12 +27,16 @@ thiserror = "2"
 tokio = { version = "1", features = ["process", "sync", "time", "rt-multi-thread", "macros"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# Trích libmagisk.so (resetprop) từ Magisk APK (APK = zip).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # HTTP-only client cho tra IP→quốc gia (ip-api.com free = HTTP, không cần TLS/key).
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+shlex = "2.0.1"
+tauri-plugin-dialog = "2"
 
 [features]
-# Cho phép build/test với backend giả lập, không cần MEmu thật.
-mock-memuc = []
+# Cho phép build/test với backend giả lập, không cần MuMu thật.
+mock-emulator = []
 
 [profile.release]
 panic = "abort"

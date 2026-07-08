@@ -18,16 +18,14 @@ const NAV: { id: View; label: string; icon: typeof LayoutDashboard; soon?: boole
  */
 export function Sidebar({ current, onNavigate }: { current: View; onNavigate: (v: View) => void }) {
   return (
-    <aside
-      className="group absolute inset-y-0 left-0 z-40 flex w-[68px] flex-col overflow-hidden border-r border-border bg-surface/95 backdrop-blur-sm transition-[width] duration-200 ease-out hover:w-60 hover:shadow-soft"
-    >
+    <aside className="group absolute inset-y-0 left-0 z-40 flex w-[68px] flex-col overflow-hidden border-r border-border bg-surface/95 backdrop-blur-sm transition-[width] duration-200 ease-out hover:w-60 hover:shadow-soft">
       {/* Logo */}
       <div className="flex h-16 shrink-0 items-center gap-3 px-[15px]">
         <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-primary text-white shadow-glow">
           <MonitorSmartphone size={18} />
         </div>
         <div className="min-w-0 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-          <div className="whitespace-nowrap text-sm font-semibold leading-tight">MEmu Manager</div>
+          <div className="whitespace-nowrap text-sm font-semibold leading-tight">MuMu Manager</div>
           <div className="whitespace-nowrap text-xs text-fg-muted">v0.1.0</div>
         </div>
       </div>

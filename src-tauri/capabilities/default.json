@@ -2,10 +2,12 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Quyền tối thiểu cho cửa sổ chính (nguyên tắc least-privilege §9 SEC-4).",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:event:default",
-    "log:default"
+    "dialog:default"
   ]
 }

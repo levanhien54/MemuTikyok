@@ -4,6 +4,7 @@ import { UserPlus, Pencil } from 'lucide-react';
 import type { AccountProfile } from '@/types/instance';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
+import { useModalFocusTrap } from '@/components/ui/useModalFocusTrap';
 import { COUNTRY_CODES, countryLabel } from '@/lib/country';
 
 const EMPTY: AccountProfile = {
@@ -25,7 +26,11 @@ export interface InstanceFormInitial {
 interface Props {
   open: boolean;
   onCancel: () => void;
-  onSubmit: (account: AccountProfile, note: string, country: string | null) => void;
+  onSubmit: (
+    account: AccountProfile,
+    note: string,
+    country: string | null,
+  ) => void | Promise<void>;
   /** 'create' (mặc định) hoặc 'edit'. */
   mode?: 'create' | 'edit';
   /** Điền sẵn form (chế độ sửa). */
@@ -37,12 +42,20 @@ interface Props {
  * quốc gia yêu cầu và ghi chú. Dùng chung cho cả "Tạo VM" lẫn "Chỉnh sửa thông tin".
  * ⚠️ Dữ liệu nhạy cảm — che mật khẩu, không log, persist phải mã hóa (§9 SRS).
  */
-export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create', initial }: Props) {
+export function CreateInstanceDialog({
+  open,
+  onCancel,
+  onSubmit,
+  mode = 'create',
+  initial,
+}: Props) {
   const isEdit = mode === 'edit';
   const [form, setForm] = useState<AccountProfile>(EMPTY);
   const [note, setNote] = useState('');
   const [country, setCountry] = useState('');
+  const [submitting, setSubmitting] = useState(false);
   const prevOpen = useRef(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   // Đồng bộ giá trị điền sẵn mỗi khi dialog chuyển từ đóng → mở.
   useEffect(() => {
@@ -50,6 +63,7 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
       setForm(initial?.account ?? EMPTY);
       setNote(initial?.note ?? '');
       setCountry(initial?.country ?? '');
+      setSubmitting(false);
     }
     prevOpen.current = open;
   }, [open, initial]);
@@ -59,14 +73,26 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
 
   const usernameValid = form.tiktokUsername.trim().length > 0;
 
-  const submit = () => {
-    if (!usernameValid) return;
-    onSubmit({ ...form, tiktokUsername: form.tiktokUsername.trim() }, note.trim(), country || null);
+  const submit = async () => {
+    if (!usernameValid || submitting) return;
+    setSubmitting(true);
+    try {
+      await onSubmit(
+        { ...form, tiktokUsername: form.tiktokUsername.trim() },
+        note.trim(),
+        country || null,
+      );
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const cancel = () => {
+    if (submitting) return;
     onCancel();
   };
+
+  useModalFocusTrap(open, dialogRef, cancel);
 
   return (
     <AnimatePresence>
@@ -79,9 +105,11 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
           onClick={cancel}
         >
           <motion.div
+            ref={dialogRef}
             role="dialog"
             aria-modal="true"
             aria-label={isEdit ? 'Chỉnh sửa thông tin tài khoản' : 'Tạo profile mới'}
+            tabIndex={-1}
             className="w-full max-w-lg rounded-lg border border-border bg-surface p-6 shadow-soft"
             initial={{ scale: 0.96, y: 10 }}
             animate={{ scale: 1, y: 0 }}
@@ -106,7 +134,7 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
               className="flex flex-col gap-4"
               onSubmit={(e) => {
                 e.preventDefault();
-                submit();
+                void submit();
               }}
             >
               <Input
@@ -125,7 +153,12 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
                   value={form.tiktokPassword}
                   onChange={set('tiktokPassword')}
                 />
-                <Input label="2FA (khóa/secret)" secret value={form.twoFa} onChange={set('twoFa')} />
+                <Input
+                  label="2FA (khóa/secret)"
+                  secret
+                  value={form.twoFa}
+                  onChange={set('twoFa')}
+                />
               </div>
 
               <Input
@@ -189,11 +222,11 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
               </div>
 
               <div className="mt-2 flex justify-end gap-3">
-                <Button type="button" variant="ghost" onClick={cancel}>
+                <Button type="button" variant="ghost" onClick={cancel} disabled={submitting}>
                   Hủy
                 </Button>
-                <Button type="submit" variant="primary" disabled={!usernameValid}>
-                  {isEdit ? 'Lưu thay đổi' : 'Tạo profile'}
+                <Button type="submit" variant="primary" disabled={!usernameValid || submitting}>
+                  {submitting ? 'Đang lưu...' : isEdit ? 'Lưu thay đổi' : 'Tạo profile'}
                 </Button>
               </div>
             </form>

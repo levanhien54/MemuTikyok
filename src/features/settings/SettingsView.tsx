@@ -1,5 +1,7 @@
 import { useSettingsStore } from '@/store/useSettingsStore';
 import { Button } from '@/components/ui/Button';
+import { open } from '@tauri-apps/plugin-dialog';
+import { FolderOpen, X } from 'lucide-react';
 
 function Field({
   label,
@@ -27,18 +29,38 @@ export function SettingsView() {
 
   if (!settings) return null;
 
+  const chooseApk = async (
+    title: string,
+    key: 'tiktokApkPath' | 'magiskApkPath',
+    mockPath: string,
+  ) => {
+    let selected: string | string[] | null = null;
+    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      selected = await open({
+        title,
+        filters: [{ name: 'Android APK', extensions: ['apk'] }],
+        multiple: false,
+      });
+    } else {
+      selected = mockPath;
+    }
+    if (typeof selected === 'string') {
+      await save({ [key]: selected });
+    }
+  };
+
   return (
     <div className="flex-1 overflow-auto p-6">
       <h1 className="mb-6 text-lg font-semibold">Settings</h1>
       <div className="max-w-2xl rounded-lg border border-border bg-surface px-6 shadow-soft">
         <Field
-          label="Đường dẫn MEmu"
-          hint="Tự dò nếu để trống. Trỏ tới THƯ MỤC cài MEmu (bản bất kỳ, kể cả Pro) hoặc file memuc.exe để chọn build muốn dùng."
+          label="Đường dẫn MuMu"
+          hint="Tự dò nếu để trống. Trỏ tới THƯ MỤC cài MuMu (bản bất kỳ, kể cả Pro) hoặc file MuMuManager.exe để chọn build muốn dùng."
         >
           <input
-            value={settings.memuPath ?? ''}
-            placeholder="Tự động dò… hoặc D:\...\MEmu"
-            onChange={(e) => void save({ memuPath: e.target.value || null })}
+            value={settings.mumuPath ?? ''}
+            placeholder="Tự động dò… hoặc D:\...\MuMu"
+            onChange={(e) => void save({ mumuPath: e.target.value || null })}
             className="h-9 w-72 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
           />
         </Field>
@@ -47,12 +69,65 @@ export function SettingsView() {
           label="Đường dẫn APK TikTok"
           hint="Để trống = dùng mặc định. Người dùng có thể trỏ tới file .apk khác."
         >
-          <input
-            value={settings.tiktokApkPath ?? ''}
-            placeholder="D:\MemuTiktok\appTiktok\tiktok-40-0-0.apk"
-            onChange={(e) => void save({ tiktokApkPath: e.target.value || null })}
-            className="h-9 w-72 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
-          />
+          <div className="flex w-96 max-w-full items-center gap-2">
+            <input
+              value={settings.tiktokApkPath ?? ''}
+              placeholder="D:\MemuTiktok\appTiktok\tiktok-40-0-0.apk"
+              onChange={(e) => void save({ tiktokApkPath: e.target.value || null })}
+              className="h-9 min-w-0 flex-1 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
+            />
+            <Button
+              type="button"
+              size="icon"
+              title="Chọn APK TikTok"
+              onClick={() =>
+                void chooseApk(
+                  'Chọn APK TikTok',
+                  'tiktokApkPath',
+                  'D:\\MemuTiktok\\appTiktok\\tiktok-40-0-0.apk',
+                )
+              }
+            >
+              <FolderOpen className="h-4 w-4" />
+            </Button>
+          </div>
+        </Field>
+
+        <Field
+          label="Magisk APK (khóa model)"
+          hint="Trỏ tới file Magisk-v30.x.apk. Để trống = dùng Magisk đi kèm bản đóng gói nếu có."
+        >
+          <div className="flex w-96 max-w-full items-center gap-2">
+            <input
+              value={settings.magiskApkPath ?? ''}
+              placeholder="D:\MemuTiktok\appTiktok\Magisk-v30.7.apk"
+              onChange={(e) => void save({ magiskApkPath: e.target.value || null })}
+              className="h-9 min-w-0 flex-1 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
+            />
+            <Button
+              type="button"
+              size="icon"
+              title="Chọn Magisk APK"
+              onClick={() =>
+                void chooseApk(
+                  'Chọn Magisk APK',
+                  'magiskApkPath',
+                  'D:\\MemuTiktok\\appTiktok\\Magisk-v30.7.apk',
+                )
+              }
+            >
+              <FolderOpen className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              title="Dùng Magisk đi kèm"
+              onClick={() => void save({ magiskApkPath: null })}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         </Field>
 
         <Field label="Chu kỳ polling (ms)" hint="Tần suất cập nhật trạng thái (1000–10000ms).">
@@ -62,22 +137,29 @@ export function SettingsView() {
             max={10000}
             step={500}
             value={settings.pollIntervalMs}
-            onChange={(e) => void save({ pollIntervalMs: Number(e.target.value) })}
+            onChange={(e) => {
+              if (Number.isFinite(e.target.valueAsNumber)) {
+                void save({ pollIntervalMs: e.target.valueAsNumber });
+              }
+            }}
             className="h-9 w-32 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
           />
         </Field>
 
-        <Field label="Số lệnh song song tối đa" hint="Giới hạn tải khi bulk start/stop (Command Queue §8.3).">
+        <Field label="Số lệnh song song tối đa" hint="Giới hạn tải khi chạy/dừng nhiều profile.">
           <input
             type="number"
             min={1}
             max={10}
             value={settings.maxConcurrency}
-            onChange={(e) => void save({ maxConcurrency: Number(e.target.value) })}
+            onChange={(e) => {
+              if (Number.isFinite(e.target.valueAsNumber)) {
+                void save({ maxConcurrency: e.target.valueAsNumber });
+              }
+            }}
             className="h-9 w-32 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
           />
         </Field>
-
 
         <Field label="Giao diện">
           <div className="flex gap-2">
