@@ -1339,8 +1339,8 @@ async fn a16_sensor_entropy_baseline() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// DUMP prop BASE thật của MuMu (TẮT resetprop lock để không bị ta ghi đè) → tham chiếu
-/// dựng device Snapdragon coherent. Không assert — in `MUMU_BASE_PROPS`. VmGuard tự dọn VM.
+/// DUMP prop BASE thật của MuMu: chỉ create/start/wait boot, KHÔNG gọi provision/reassert/resetprop.
+/// Không assert — in `MUMU_BASE_PROPS`. VmGuard tự dọn VM.
 #[tokio::test]
 #[ignore]
 async fn dump_mumu_base_props() {
@@ -1349,16 +1349,21 @@ async fn dump_mumu_base_props() {
         return;
     }
     let (state, dir) = make_state("dump").await;
-    state.set_magisk_bin(None); // thấy prop base MuMu, không khóa
     let mp = emulator_path();
     let guard = VmGuard::new(mp.clone());
     let before = index_set(&state).await;
 
-    let idx = orchestrator::provision(&state, "acc_dump", &hw(), None)
+    let idx = orchestrator::create_vm(&state)
         .await
-        .expect("provision dump");
+        .expect("create dump VM");
     guard.track(idx);
     assert_new_index(&before, idx);
+    state.emulator.start(idx).await.expect("start dump VM");
+    state
+        .adb
+        .wait_boot_completed(idx)
+        .await
+        .expect("boot dump VM");
 
     for name in [
         "ro.product.model",

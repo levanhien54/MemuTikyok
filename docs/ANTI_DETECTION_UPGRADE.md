@@ -38,7 +38,7 @@
 | **cờ `hypervisor`** trong `/proc/cpuinfo` | Chạy trong VM | ❌ Không có tool OSS strip khỏi nội dung cpuinfo trên x86 |
 | **`ro.product.model` bị MuMu random khi boot** | MuMu ghi đè MUỘN trong boot (sau post-fs-data) | ✅ **resetprop re-apply mỗi boot** (khả thi, ABI-independent) |
 | **`ro.build.characteristics=tablet`** | MuMu báo tablet trong khi profile giả là điện thoại Samsung/Redmi | ✅ **resetprop runtime**: profile có giá trị thật thì set, rỗng thì `--delete` prop để gỡ tell `tablet`; không dùng sed `/system/build.prop` vì VM disposable không reboot |
-| imei / root | MPM áp qua `MuMuManager.exe simulation` trước khi chạy app | ✅ Đã ổn |
+| imei / root | Root áp qua `MuMuManager.exe simulation`; IMEI chỉ áp khi profile có TAC đã verify, TAC rỗng thì không bịa IMEI random | ✅ Có guard |
 | độ phân giải/DPI runtime | MPM áp qua `custom_resolution`, sau boot gọi thêm `wm size` / `wm density`, và re-assert sau install/restore | ✅ Có mitigation; cần verify B2.1 trên máy thật |
 | android_id | MPM áp/re-apply qua adb trước khi start app, nhưng Android 8+/GMS có thể cấp lại SSAID theo app sau khi cài/chạy TikTok | ⚠️ Known-gap, cần verify sau mỗi phiên |
 

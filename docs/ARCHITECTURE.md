@@ -129,8 +129,9 @@ hoặc schema generator tương đương để tránh lệch schema.
 - `EmulatorClient` dùng `MuMuManager.exe info -v all`, `clone`, `control launch/shutdown`,
   `delete`, và `simulation`.
 - Fingerprint production dùng `MuMuManager.exe simulation -v <idx> -sk <key> -sv <value>`:
-  `imei`, `microvirt_vm_model`, `microvirt_vm_brand`, `microvirt_vm_manufacturer`,
-  `mac_address`, `enable_su`, `custom_resolution`.
+  `microvirt_vm_model`, `microvirt_vm_brand`, `microvirt_vm_manufacturer`,
+  `mac_address`, `enable_su`, `custom_resolution`; `imei` chỉ set khi profile có TAC đã verify
+  (không bịa IMEI random khi TAC rỗng).
 - Runtime fingerprint sau boot dùng ADB: `wm size/density`, `settings put secure android_id`,
   và `resetprop` cho `ro.product.*`/`ro.build.fingerprint` nếu có Magisk APK cấu hình hoặc bundled.
 - `android_id` áp qua adb, không coi là khóa MuMuManager đáng tin cậy; Android 8+ SSAID/GMS

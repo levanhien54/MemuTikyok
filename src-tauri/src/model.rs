@@ -63,14 +63,17 @@ impl HardwareProfile {
     /// Các cặp (key, value) cho `EmulatorClient::set_config`; MuMu adapter map sang `simulation`.
     /// KHÔNG gồm android_id (adb) và custom_resolution (cần 3 tham số → set_resolution).
     pub fn emulator_pairs(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("imei", self.imei.clone()),
+        let mut pairs = vec![
             ("model", self.model.clone()),
             ("manufacturer", self.manufacturer.clone()),
             ("brand", self.brand.clone()),
             ("mac_address", self.mac.clone()),
             ("enable_su", "1".to_string()),
-        ]
+        ];
+        if !self.imei.trim().is_empty() {
+            pairs.insert(0, ("imei", self.imei.clone()));
+        }
+        pairs
     }
 }
 
@@ -294,5 +297,32 @@ mod tests {
         let back: AppSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tiktok_apk_path.as_deref(), Some("D:/a.apk"));
         assert_eq!(back.magisk_apk_path.as_deref(), Some("D:/Magisk-v30.7.apk"));
+    }
+
+    #[test]
+    fn emulator_pairs_bo_qua_imei_rong() {
+        let hw = HardwareProfile {
+            model: "POCO F2 Pro".into(),
+            brand: "POCO".into(),
+            manufacturer: "Xiaomi".into(),
+            imei: String::new(),
+            android_id: "a1b2c3d4e5f60708".into(),
+            mac: "02:00:00:11:22:33".into(),
+            res_width: 1080,
+            res_height: 2400,
+            dpi: 440,
+            device: "lmi".into(),
+            build_fingerprint:
+                "POCO/lmi_global/lmi:11/RKQ1.200826.002/V12.5.1.0.RJKMIXM:user/release-keys".into(),
+            soc_hardware: "qcom".into(),
+            board_platform: "kona".into(),
+            gpu_egl: "adreno".into(),
+            security_patch: "2021-06-01".into(),
+            build_characteristics: String::new(),
+        };
+        assert!(
+            !hw.emulator_pairs().iter().any(|(key, _)| *key == "imei"),
+            "khong gui IMEI random khi TAC chua verify"
+        );
     }
 }
