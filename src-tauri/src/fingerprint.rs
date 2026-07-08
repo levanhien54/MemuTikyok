@@ -12,8 +12,8 @@ use crate::model::HardwareProfile;
 /// ⚠️ Mọi `fingerprint` phải là build THẬT của thiết bị (ByteDance có thể đối chiếu).
 /// Mở rộng bảng bằng bộ đã kiểm chứng, KHÔNG bịa build id.
 ///
-/// ⚠️ ĐỘ PHÂN GIẢI phải MEmu-AN-TOÀN: rộng ≤ 1080, dpi ≤ 480. QHD (1440×2560@640)
-/// LÀM CRASH MEmu Launcher2 ("keeps stopping") — đã kiểm chứng qua logcat. Máy QHD
+/// ⚠️ ĐỘ PHÂN GIẢI phải MuMu-AN-TOÀN: rộng ≤ 1080, dpi ≤ 480. QHD (1440×2560@640)
+/// LÀM CRASH MuMu Launcher2 ("keeps stopping") — đã kiểm chứng qua logcat. Máy QHD
 /// thật (Note FE) chạy FHD 16:9 là bình thường, nên dùng 1080×1920 cho profile đó.
 struct DeviceProfile {
     model: &'static str,
@@ -34,7 +34,7 @@ const DEVICES: &[DeviceProfile] = &[
         manufacturer: "samsung",
         device: "gracerlte",
         fingerprint: "samsung/gracerltexx/gracerlte:8.0.0/R16NW/N935FXXS4BRK2:user/release-keys",
-        // Note FE native QHD 1440×2560@640 làm CRASH MEmu Launcher2 → chạy FHD 16:9 (an toàn + thực tế).
+        // Note FE native QHD 1440×2560@640 làm CRASH MuMu Launcher2 → chạy FHD 16:9 (an toàn + thực tế).
         w: 1080,
         h: 1920,
         dpi: 480,

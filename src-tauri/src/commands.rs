@@ -103,6 +103,16 @@ pub async fn run_watch_session(
 
 // ── Cài đặt ──
 
+/// Nạp file video/ảnh từ máy tính vào máy ảo để chuẩn bị đăng TikTok.
+#[tauri::command]
+pub async fn upload_video_to_vm(
+    index: u32,
+    local_path: String,
+    state: State<'_, SharedState>,
+) -> AppResult<()> {
+    state.adb.upload_media(index, &local_path).await
+}
+
 #[tauri::command]
 pub async fn get_settings(state: State<'_, SharedState>) -> AppResult<AppSettings> {
     Ok(state.settings.lock().await.clone())
@@ -114,23 +124,61 @@ pub async fn get_logs(logs: State<'_, crate::logcap::LogBuffer>) -> AppResult<Ve
     Ok(logs.lock().unwrap().iter().cloned().collect())
 }
 
+fn normalize_settings(settings: &mut AppSettings) {
+    settings.poll_interval_ms = settings.poll_interval_ms.max(250);
+    settings.max_concurrency = settings.max_concurrency.max(1);
+}
+
 #[tauri::command]
 pub async fn save_settings(
     mut settings: AppSettings,
     state: State<'_, SharedState>,
 ) -> AppResult<AppSettings> {
     // Ràng buộc giá trị an toàn: poll ≥ 250ms (interval(0) panic), concurrency ≥ 1.
-    settings.poll_interval_ms = settings.poll_interval_ms.max(250);
-    settings.max_concurrency = settings.max_concurrency.max(1);
+    normalize_settings(&mut settings);
     {
         let mut guard = state.settings.lock().await;
         *guard = settings.clone();
     }
-    // Lưu ra đĩa để giữ cấu hình (vd đường dẫn MEmu bản Pro) qua các lần chạy.
+    state.queue.set_limit(settings.max_concurrency as usize);
+    // Lưu ra đĩa để giữ cấu hình (vd đường dẫn MuMu bản Pro) qua các lần chạy.
     crate::persist_settings(&settings);
     // Áp NGAY thay đổi Magisk APK (trích lại binary + set) — nếu không, đổi/trỏ đường dẫn
     // trong Cài đặt sẽ KHÔNG khóa được model cho tới khi khởi động lại app. Trỏ rỗng → None
     // (tắt khóa model). Cache theo mtime nên gọi lại mỗi lần lưu là rẻ khi APK không đổi.
     state.set_magisk_bin(crate::init_magisk_bin(&settings));
     Ok(settings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_settings_clamps_unsafe_values() {
+        let mut settings = AppSettings {
+            poll_interval_ms: 0,
+            max_concurrency: 0,
+            ..AppSettings::default()
+        };
+
+        normalize_settings(&mut settings);
+
+        assert_eq!(settings.poll_interval_ms, 250);
+        assert_eq!(settings.max_concurrency, 1);
+    }
+
+    #[test]
+    fn normalize_settings_keeps_valid_values() {
+        let mut settings = AppSettings {
+            poll_interval_ms: 1500,
+            max_concurrency: 4,
+            ..AppSettings::default()
+        };
+
+        normalize_settings(&mut settings);
+
+        assert_eq!(settings.poll_interval_ms, 1500);
+        assert_eq!(settings.max_concurrency, 4);
+    }
 }

@@ -93,7 +93,9 @@ export function FingerprintDialog({ open, accountName, hardware, onClose }: Prop
                   <Row label="Model" value={hardware.model} />
                   <Row label="Hãng (brand)" value={hardware.brand} />
                   <Row label="Nhà sản xuất" value={hardware.manufacturer} />
-                  {hardware.device ? <Row label="Device (codename)" value={hardware.device} /> : null}
+                  {hardware.device ? (
+                    <Row label="Device (codename)" value={hardware.device} />
+                  ) : null}
                   <Row label="IMEI" value={hardware.imei} />
                   <Row label="Android ID" value={hardware.androidId} />
                   <Row label="MAC" value={hardware.mac} />
@@ -108,8 +110,8 @@ export function FingerprintDialog({ open, accountName, hardware, onClose }: Prop
                 </div>
                 <p className="mt-3 text-[11px] leading-snug text-fg-muted">
                   ⚠️ Đây là fingerprint <b>đã lưu</b> cho tài khoản (áp khi khởi chạy). Riêng
-                  <b> model</b> có thể bị MEmu ghi đè ngẫu nhiên khi VM boot — android_id & độ
-                  phân giải là các trường thực sự có hiệu lực.
+                  <b> model</b> có thể bị MuMu ghi đè ngẫu nhiên khi VM boot — android_id & độ phân
+                  giải là các trường thực sự có hiệu lực.
                 </p>
               </>
             )}

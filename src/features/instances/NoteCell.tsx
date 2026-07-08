@@ -5,13 +5,7 @@ import { cn } from '@/lib/cn';
  * Ô ghi chú sửa trực tiếp trong bảng. Lưu khi blur hoặc Enter; Esc để hủy.
  * Giữ state cục bộ để không mất focus khi danh sách re-render (polling).
  */
-export function NoteCell({
-  value,
-  onSave,
-}: {
-  value: string;
-  onSave: (note: string) => void;
-}) {
+export function NoteCell({ value, onSave }: { value: string; onSave: (note: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
   const ref = useRef<HTMLInputElement>(null);

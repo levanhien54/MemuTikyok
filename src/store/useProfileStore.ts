@@ -1,9 +1,16 @@
 import { create } from 'zustand';
 import type { AccountProfile, ProfileView } from '@/types/instance';
 import { getBackend } from '@/lib';
+import { useSettingsStore } from '@/store/useSettingsStore';
 import { toast } from '@/store/useToastStore';
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error';
+const DEFAULT_POLL_INTERVAL_MS = 5000;
+
+function profilePollIntervalMs(): number {
+  const ms = useSettingsStore.getState().settings?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  return Number.isFinite(ms) ? Math.max(250, ms) : DEFAULT_POLL_INTERVAL_MS;
+}
 
 interface ProfileState {
   profiles: ProfileView[];
@@ -48,13 +55,22 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
       (index, message) => toast.error(`Phiên VM #${index} lỗi: ${message}`),
     );
     // Poll định kỳ: giữ badge "đang chạy VM #N" đồng bộ nếu VM bị hủy ngoài luồng app.
-    const poll = setInterval(() => void get().refresh(), 5000);
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const restartPoll = () => {
+      if (poll) clearInterval(poll);
+      poll = setInterval(() => void get().refresh(), profilePollIntervalMs());
+    };
+    restartPoll();
+    const unsubSettings = useSettingsStore.subscribe((state, prevState) => {
+      if (state.settings?.pollIntervalMs !== prevState.settings?.pollIntervalMs) restartPoll();
+    });
     // Refresh khi cửa sổ được focus lại (người dùng quay lại app).
     const onFocus = () => void get().refresh();
     window.addEventListener('focus', onFocus);
     return () => {
       unsub();
-      clearInterval(poll);
+      unsubSettings();
+      if (poll) clearInterval(poll);
       window.removeEventListener('focus', onFocus);
     };
   },

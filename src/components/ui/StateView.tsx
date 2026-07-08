@@ -24,10 +24,5 @@ export function StateView({
 }
 
 export function LoadingView({ label = 'Đang tải…' }: { label?: string }) {
-  return (
-    <StateView
-      icon={<Loader2 className="animate-spin" size={28} />}
-      title={label}
-    />
-  );
+  return <StateView icon={<Loader2 className="animate-spin" size={28} />} title={label} />;
 }

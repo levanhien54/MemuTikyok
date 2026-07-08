@@ -1,4 +1,4 @@
-//! State dùng chung của ứng dụng (§8.3 SRS). Giữ adapter memuc, hàng đợi lệnh,
+//! State dùng chung của ứng dụng (§8.3 SRS). Giữ adapter emulator, hàng đợi lệnh,
 //! registry instance, settings, metadata (persist SQLite) và geolocator.
 
 use std::collections::{HashMap, HashSet};
@@ -9,15 +9,15 @@ use tokio::sync::Mutex;
 
 use crate::adb::AdbWorker;
 use crate::db::Db;
+use crate::emulator::EmulatorClient;
 use crate::geo::IpGeolocator;
-use crate::memuc::MemucClient;
 use crate::model::{AccountProfile, AppSettings, HardwareProfile, Profile};
 use crate::queue::CommandQueue;
 use crate::snapshot::SnapshotStore;
 
 /// vm_index "đặt chỗ": một lần `run` đang provision (chưa có VM thật). Chiếm slot
 /// trong cổng tối đa để chống đua, nhưng KHÔNG hiển thị là đang chạy. `u32::MAX` là
-/// index bất khả (memuc không bao giờ cấp) nên an toàn làm cờ.
+/// index bất khả (emulator không bao giờ cấp) nên an toàn làm cờ.
 pub const RESERVED_VM: u32 = u32::MAX;
 
 /// Kết quả đặt chỗ slot chạy (nguyên tử) — xem `AppState::reserve_run_slot`.
@@ -32,7 +32,7 @@ pub enum RunSlot {
     Reserved,
 }
 
-/// Metadata do MPM tự quản cho từng VM (không thuộc memuc). Persist vào SQLite.
+/// Metadata do MPM tự quản cho từng VM (không thuộc emulator). Persist vào SQLite.
 #[derive(Debug, Clone, Default)]
 pub struct InstanceMeta {
     pub account: Option<AccountProfile>,
@@ -44,7 +44,7 @@ pub struct InstanceMeta {
 }
 
 pub struct AppState {
-    pub memuc: Arc<dyn MemucClient>,
+    pub emulator: Arc<dyn EmulatorClient>,
     pub geo: Arc<dyn IpGeolocator>,
     pub adb: Arc<dyn AdbWorker>,
     pub store: Arc<dyn SnapshotStore>,
@@ -73,7 +73,7 @@ pub struct AppState {
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        memuc: Arc<dyn MemucClient>,
+        emulator: Arc<dyn EmulatorClient>,
         geo: Arc<dyn IpGeolocator>,
         adb: Arc<dyn AdbWorker>,
         store: Arc<dyn SnapshotStore>,
@@ -91,7 +91,7 @@ impl AppState {
             .map(|p| (p.username.clone(), p))
             .collect();
         Self {
-            memuc,
+            emulator,
             geo,
             adb,
             store,

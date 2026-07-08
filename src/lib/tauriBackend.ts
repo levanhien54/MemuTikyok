@@ -39,6 +39,9 @@ export function createTauriBackend(): Backend {
     runWatchSession(index) {
       return invoke<void>('run_watch_session', { index });
     },
+    uploadVideoToVm(index, localPath) {
+      return invoke<void>('upload_video_to_vm', { index, localPath });
+    },
     subscribeAutomation(onDone, onError) {
       const pDone = listen<SessionReport>('automation:done', (e) => onDone(e.payload));
       const pErr = listen<{ index: number; error: string }>('automation:error', (e) =>

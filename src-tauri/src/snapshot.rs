@@ -16,8 +16,11 @@ use sha2::{Digest, Sha256};
 use crate::crypto::{self, Key32};
 use crate::error::AppResult;
 
-/// Mức nén zstd. 19 cho tỉ lệ cao; dữ liệu phiên nhỏ nên vẫn nhanh.
-const ZSTD_LEVEL: i32 = 19;
+/// Mức nén zstd cân bằng cho thao tác Dừng profile.
+///
+/// Level 19 cho tỉ lệ tốt hơn rất ít trên fixture phiên TikTok nhưng chậm mạnh
+/// (đo 16 MiB mất ~21s). Level 6 giữ dung lượng gần tương đương và giảm độ trễ.
+const ZSTD_LEVEL: i32 = 6;
 
 /// Metadata của blob ĐÃ LƯU (sau nén) — dùng để verify toàn vẹn & thống kê dung lượng.
 #[derive(Debug, Clone)]
@@ -108,8 +111,14 @@ impl SnapshotStore for LocalSnapshotStore {
         let seq = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
         let fname = dst.file_name().and_then(|s| s.to_str()).unwrap_or("snap");
         let tmp = dst.with_file_name(format!("{fname}.{}.{seq}.tmp", std::process::id()));
-        fs::write(&tmp, &blob)?;
-        fs::rename(&tmp, &dst)?;
+        if let Err(e) = fs::write(&tmp, &blob) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+        if let Err(e) = fs::rename(&tmp, &dst) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
+        }
 
         Ok(StoredMeta {
             sha256: sha256_bytes(&blob),
@@ -152,6 +161,7 @@ impl SnapshotStore for LocalSnapshotStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     fn tmp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mpm_snap_test_{}_{tag}", std::process::id()));
@@ -208,6 +218,104 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
             .collect();
         assert!(leftover.is_empty(), "còn sót file .tmp: {leftover:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn synthetic_tiktok_snapshot() -> Vec<u8> {
+        const TARGET: usize = 16 * 1024 * 1024;
+        let mut out = Vec::with_capacity(TARGET);
+
+        while out.len() < 4 * 1024 * 1024 {
+            let i = out.len();
+            out.extend_from_slice(
+                format!(
+                    r#"<map><string name="session_{i}">device_id=731{i};install_id=882{i};locale=vi-VN</string><boolean name="logged_in" value="true" /></map>"#
+                )
+                .as_bytes(),
+            );
+        }
+
+        while out.len() < 10 * 1024 * 1024 {
+            let page_start = out.len();
+            out.extend_from_slice(b"SQLite format 3\0");
+            out.resize(page_start + 4096, 0);
+            let row = format!("cookie|sid_tt|{page_start}|/|.tiktok.com|HttpOnly\n");
+            let row_bytes = row.as_bytes();
+            let copy_at = page_start + 128;
+            out[copy_at..copy_at + row_bytes.len()].copy_from_slice(row_bytes);
+        }
+
+        while out.len() < 12 * 1024 * 1024 {
+            out.extend_from_slice(
+                b"app_webview/Default/Cookies\tWebData\tshared_prefs\tdevice_register\n",
+            );
+        }
+
+        let mut x = 0x1234_5678_9abc_def0u64;
+        while out.len() < TARGET {
+            x ^= x << 7;
+            x ^= x >> 9;
+            x ^= x << 8;
+            out.extend_from_slice(&x.to_le_bytes());
+        }
+        out.truncate(TARGET);
+        out
+    }
+
+    #[tokio::test]
+    #[ignore = "diagnostic benchmark; run with --ignored --nocapture when measuring snapshot storage"]
+    async fn do_hieu_nang_va_dung_luong_snapshot_store_fixture() {
+        let dir = tmp_dir("metrics");
+        let store = LocalSnapshotStore::new(dir.join("kho"), Some([9u8; 32])).unwrap();
+        let plain = synthetic_tiktok_snapshot();
+        let src = dir.join("fixture.tar");
+        fs::write(&src, &plain).unwrap();
+
+        let put_start = Instant::now();
+        let meta = store.put("acc/fixture.tar.zst", &src).await.unwrap();
+        let put_ms = put_start.elapsed().as_millis();
+
+        let verify_start = Instant::now();
+        assert!(store
+            .verify("acc/fixture.tar.zst", &meta.sha256)
+            .await
+            .unwrap());
+        let verify_ms = verify_start.elapsed().as_millis();
+
+        let out = dir.join("fixture.out.tar");
+        let get_start = Instant::now();
+        store.get("acc/fixture.tar.zst", &out).await.unwrap();
+        let get_ms = get_start.elapsed().as_millis();
+
+        assert_eq!(fs::read(&out).unwrap(), plain);
+        let stored_path = dir.join("kho/acc/fixture.tar.zst");
+        assert_eq!(fs::metadata(stored_path).unwrap().len(), meta.size_bytes);
+        assert!(
+            meta.size_bytes < fs::metadata(&src).unwrap().len(),
+            "fixture phải nén nhỏ hơn raw"
+        );
+
+        let raw_bytes = plain.len() as f64;
+        let stored_bytes = meta.size_bytes as f64;
+        let ratio = stored_bytes / raw_bytes;
+        let saved_pct = (1.0 - ratio) * 100.0;
+        let put_mib_s = raw_bytes / 1024.0 / 1024.0 / (put_ms.max(1) as f64 / 1000.0);
+        let get_mib_s = raw_bytes / 1024.0 / 1024.0 / (get_ms.max(1) as f64 / 1000.0);
+        println!(
+            "SNAPSHOT_METRICS raw_bytes={} raw_mib={:.2} stored_bytes={} stored_mib={:.2} ratio={:.3} saved_pct={:.1} put_ms={} verify_ms={} get_ms={} put_mib_s={:.1} get_mib_s={:.1}",
+            plain.len(),
+            raw_bytes / 1024.0 / 1024.0,
+            meta.size_bytes,
+            stored_bytes / 1024.0 / 1024.0,
+            ratio,
+            saved_pct,
+            put_ms,
+            verify_ms,
+            get_ms,
+            put_mib_s,
+            get_mib_s,
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

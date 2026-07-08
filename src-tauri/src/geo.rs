@@ -20,7 +20,7 @@ pub trait IpGeolocator: Send + Sync {
 
 /// Tra quốc gia thật qua ip-api.com (miễn phí, không cần khóa, giới hạn 45 req/phút).
 ///
-/// IP của VM mà memuc báo là IP LAN (192.168.x) → không tra được trực tiếp. Với IP
+/// IP của VM mà emulator báo là IP LAN (192.168.x) → không tra được trực tiếp. Với IP
 /// riêng/rỗng ta tra **IP công khai của chính host** (`/json/` không tham số): vì đã
 /// bỏ proxy, VM thoát mạng qua NAT của host nên cùng quốc gia.
 ///

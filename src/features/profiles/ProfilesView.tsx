@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import { MonitorSmartphone, Plus, RefreshCw, ServerCrash } from 'lucide-react';
 import { useProfileStore } from '@/store/useProfileStore';
 import { getBackend } from '@/lib';
@@ -19,6 +20,7 @@ export function ProfilesView() {
   const [editProfile, setEditProfile] = useState<ProfileView | null>(null);
   const [fpState, setFpState] = useState<{ name: string; view: ProfileView } | null>(null);
   const [pendingDelete, setPendingDelete] = useState<ProfileView | null>(null);
+  const [uploadingSet, setUploadingSet] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const filtered = useMemo(() => {
@@ -86,6 +88,36 @@ export function ProfilesView() {
       );
   };
 
+  const doUploadVideo = async (view: ProfileView) => {
+    if (view.runningVm == null) return;
+    try {
+      let selected: string | string[] | null = null;
+      if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+        selected = await open({
+          title: 'Chọn file video (MP4, MOV, v.v.)',
+          filters: [{ name: 'Video', extensions: ['mp4', 'mov', 'avi', 'mkv', 'webm'] }],
+          multiple: false,
+        });
+      } else {
+        selected = 'C:\\mock\\test_video.mp4';
+      }
+      if (selected === null || typeof selected !== 'string') return;
+
+      setUploadingSet((prev) => new Set(prev).add(view.profile.username));
+      toast.info(`Đang đưa video vào máy ảo "${view.profile.username}"…`);
+      await getBackend().uploadVideoToVm(view.runningVm, selected);
+      toast.success(`Đã đưa video vào VM thành công! Bạn có thể mở ứng dụng TikTok để đăng.`);
+    } catch (e: unknown) {
+      toast.error(`Lỗi chuyển video: ${e instanceof Error ? e.message : e}`);
+    } finally {
+      setUploadingSet((prev) => {
+        const next = new Set(prev);
+        next.delete(view.profile.username);
+        return next;
+      });
+    }
+  };
+
   return (
     <div className="flex flex-1 flex-col overflow-hidden p-6">
       <div className="mb-4 flex items-center gap-3">
@@ -137,12 +169,14 @@ export function ProfilesView() {
                 key={view.profile.username}
                 view={view}
                 busy={busy.has(view.profile.username)}
+                isUploading={uploadingSet.has(view.profile.username)}
                 onRun={doRun}
                 onStop={doStop}
                 onEdit={(v) => setEditProfile(v)}
                 onViewFingerprint={(v) => setFpState({ name: v.profile.username, view: v })}
                 onScanEmulator={doScanEmulator}
                 onRunSession={doRunSession}
+                onUploadVideo={doUploadVideo}
                 onDelete={(v) => setPendingDelete(v)}
                 onUpdateNote={(username, note) => {
                   const p = profiles.find((x) => x.profile.username === username)?.profile;

@@ -13,19 +13,36 @@ function mockFingerprint(title: string): HardwareProfile {
   // Bộ device NHẤT QUÁN (model/brand/device khớp buildFingerprint) — khớp bảng Rust.
   const devices = [
     {
-      model: 'SM-N935F', brand: 'samsung', manufacturer: 'samsung', device: 'gracerlte',
+      model: 'SM-N935F',
+      brand: 'samsung',
+      manufacturer: 'samsung',
+      device: 'gracerlte',
       buildFingerprint: 'samsung/gracerltexx/gracerlte:8.0.0/R16NW/N935FXXS4BRK2:user/release-keys',
-      resWidth: 1080, resHeight: 1920, dpi: 480,
+      resWidth: 1080,
+      resHeight: 1920,
+      dpi: 480,
     },
     {
-      model: 'SM-G960F', brand: 'samsung', manufacturer: 'samsung', device: 'starlte',
-      buildFingerprint: 'samsung/starltexx/starlte:10/QP1A.190711.020/G960FXXUFFUJ1:user/release-keys',
-      resWidth: 1080, resHeight: 2220, dpi: 480,
+      model: 'SM-G960F',
+      brand: 'samsung',
+      manufacturer: 'samsung',
+      device: 'starlte',
+      buildFingerprint:
+        'samsung/starltexx/starlte:10/QP1A.190711.020/G960FXXUFFUJ1:user/release-keys',
+      resWidth: 1080,
+      resHeight: 2220,
+      dpi: 480,
     },
     {
-      model: 'Redmi Note 8', brand: 'Redmi', manufacturer: 'Xiaomi', device: 'ginkgo',
-      buildFingerprint: 'Redmi/ginkgo/ginkgo:11/RP1A.200720.011/V12.5.1.0.RCOMIXM:user/release-keys',
-      resWidth: 1080, resHeight: 2340, dpi: 440,
+      model: 'Redmi Note 8',
+      brand: 'Redmi',
+      manufacturer: 'Xiaomi',
+      device: 'ginkgo',
+      buildFingerprint:
+        'Redmi/ginkgo/ginkgo:11/RP1A.200720.011/V12.5.1.0.RCOMIXM:user/release-keys',
+      resWidth: 1080,
+      resHeight: 2340,
+      dpi: 440,
     },
   ];
   let h = 0;
@@ -48,7 +65,7 @@ function emptyAccount(username: string): AccountProfile {
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
-  memuPath: null,
+  mumuPath: null,
   pollIntervalMs: 3000,
   maxConcurrency: 3,
   theme: 'dark',
@@ -78,7 +95,7 @@ function saveProfiles(p: Record<string, Profile>): void {
 }
 
 /**
- * Backend giả lập cho phát triển UI & test khi chưa có Rust/MEmu.
+ * Backend giả lập cho phát triển UI & test khi chưa có Rust/MuMu.
  * Kiến trúc DISPOSABLE: chỉ vòng đời PROFILE. Profile persist vào localStorage —
  * đóng vai "cơ sở dữ liệu" phía web, sống sót qua reload (bản Tauri dùng SQLite).
  */
@@ -171,7 +188,7 @@ export function createMockBackend(): Backend {
       saveProfiles(profiles);
     },
     async scanEmulator(_index: number) {
-      // Mẫu khớp thực tế MEmu: chỉ còn native-bridge + hypervisor lộ.
+      // Mẫu khớp thực tế MuMu: chỉ còn native-bridge + hypervisor lộ.
       return [
         { check: 'Native Bridge (ARM→x86)', detected: true, detail: 'libnb.so' },
         { check: 'CPU hypervisor flag', detected: true, detail: "cpuinfo có 'hypervisor'" },
@@ -179,9 +196,15 @@ export function createMockBackend(): Backend {
         { check: 'File QEMU/Genymotion', detected: false, detail: 'sạch' },
         { check: 'GPU renderer ảo', detected: false, detail: 'GPU thật (Adreno/Mali)' },
         {
+          check: 'Motion sensors',
+          detected: true,
+          detail: 'mock: cần chạy A.16 trên MuMu thật để đo accel/gyro/magnetometer',
+        },
+        { check: 'Sensor provider tells', detected: false, detail: 'mock' },
+        {
           check: 'Magisk/resetprop (khóa model)',
           detected: true,
-          detail: 'THIẾU — model bị MEmu ghi đè (đặt Magisk APK trong Cài đặt)',
+          detail: 'THIẾU — model bị MuMu ghi đè (đặt Magisk APK trong Cài đặt)',
         },
       ];
     },
@@ -193,6 +216,9 @@ export function createMockBackend(): Backend {
         const report: SessionReport = { index, videos, liked, durationMs: videos * 9000 };
         autoDone.forEach((cb) => cb(report));
       }, 1500);
+    },
+    async uploadVideoToVm(_index: number, _localPath: string) {
+      console.log('MOCK: uploadVideoToVm', _index, _localPath);
     },
     subscribeAutomation(onDone, onError) {
       autoDone.add(onDone);

@@ -1,5 +1,15 @@
 import { memo } from 'react';
-import { Play, Square, Fingerprint, ShieldCheck, Bot, Pencil, Trash2 } from 'lucide-react';
+import {
+  Play,
+  Square,
+  Fingerprint,
+  ShieldCheck,
+  Bot,
+  Pencil,
+  Trash2,
+  Video,
+  Loader2,
+} from 'lucide-react';
 import type { ProfileView } from '@/types/instance';
 import { Button } from '@/components/ui/Button';
 import { DropdownMenu, type MenuItem } from '@/components/ui/DropdownMenu';
@@ -11,12 +21,14 @@ import { CountryCell } from '@/features/instances/CountryCell';
 interface Props {
   view: ProfileView;
   busy: boolean;
+  isUploading?: boolean;
   onRun: (username: string) => void;
   onStop: (username: string) => void;
   onEdit: (view: ProfileView) => void;
   onViewFingerprint: (view: ProfileView) => void;
   onScanEmulator: (view: ProfileView) => void;
   onRunSession: (view: ProfileView) => void;
+  onUploadVideo: (view: ProfileView) => void;
   onDelete: (view: ProfileView) => void;
   onUpdateNote: (username: string, note: string) => void;
   onUpdateCountry: (username: string, country: string | null) => void;
@@ -29,12 +41,14 @@ interface Props {
 function ProfileRowImpl({
   view,
   busy,
+  isUploading,
   onRun,
   onStop,
   onEdit,
   onViewFingerprint,
   onScanEmulator,
   onRunSession,
+  onUploadVideo,
   onDelete,
   onUpdateNote,
   onUpdateCountry,
@@ -97,10 +111,7 @@ function ProfileRowImpl({
         {running ? `Chạy · VM #${view.runningVm}` : 'Nghỉ'}
       </span>
 
-      <CountryCell
-        value={profile.country}
-        onSave={(c) => onUpdateCountry(profile.username, c)}
-      />
+      <CountryCell value={profile.country} onSave={(c) => onUpdateCountry(profile.username, c)} />
       <NoteCell value={profile.note} onSave={(n) => onUpdateNote(profile.username, n)} />
 
       <span
@@ -113,17 +124,30 @@ function ProfileRowImpl({
       {/* Hành động */}
       <div className="flex items-center justify-end gap-1">
         {running ? (
-          <Button
-            size="icon"
-            variant="ghost"
-            disabled={busy}
-            onClick={() => onStop(profile.username)}
-            aria-label="Dừng"
-            title="Dừng + backup phiên (hủy VM)"
-            className="text-danger hover:bg-danger/10"
-          >
-            <Square size={16} />
-          </Button>
+          <>
+            <Button
+              size="icon"
+              variant="ghost"
+              disabled={busy || isUploading}
+              onClick={() => onUploadVideo(view)}
+              aria-label="Nạp Video"
+              title="Đưa video vào bộ sưu tập máy ảo"
+              className="text-primary hover:bg-primary/10"
+            >
+              {isUploading ? <Loader2 size={16} className="animate-spin" /> : <Video size={16} />}
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => onStop(profile.username)}
+              aria-label="Dừng"
+              title="Dừng + backup phiên (hủy VM)"
+              className="text-danger hover:bg-danger/10"
+            >
+              <Square size={16} />
+            </Button>
+          </>
         ) : (
           <Button
             size="icon"

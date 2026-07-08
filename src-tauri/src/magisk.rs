@@ -1,6 +1,6 @@
-//! Trích **resetprop** từ Magisk APK để khóa `ro.*` (model/fingerprint) trên VM MEmu.
+//! Trích **resetprop** từ Magisk APK để khóa `ro.*` (model/fingerprint) trên VM MuMu.
 //!
-//! Bối cảnh: MEmu có root NATIVE (`enable_su=1` → uid=0) nhưng KHÔNG có Magisk/resetprop.
+//! Bối cảnh: MuMu có root NATIVE (`enable_su=1` → uid=0) nhưng KHÔNG có Magisk/resetprop.
 //! `resetprop` là applet của binary `magisk` (đóng gói sẵn trong Magisk APK dưới
 //! `lib/<abi>/libmagisk.so`). Vì đã có root, ta chỉ cần **đẩy binary vào VM và chạy
 //! `magisk resetprop`** — KHÔNG cần cài Magisk vào hệ thống. Hợp với mô hình disposable:
@@ -14,11 +14,12 @@ use std::path::{Path, PathBuf};
 pub const VM_MAGISK_PATH: &str = "/data/local/tmp/magisk";
 
 /// Trích `lib/<abi>/libmagisk.so` từ Magisk APK ra `cache_dir/magisk-<abi>` (idempotent —
-/// đã có thì trả luôn). MEmu hiện tại là **x86_64** (đã kiểm chứng); hỗ trợ thêm x86.
+/// đã có thì trả luôn). MuMu hiện tại là **x86_64** (đã kiểm chứng); hỗ trợ thêm x86.
 /// Trả `None` nếu apk không mở được / thiếu entry.
 pub fn ensure_binary(apk_path: &str, cache_dir: &Path) -> Option<PathBuf> {
-    // MEmu android 9 = x86_64 (abilist: x86_64,arm64-v8a,x86,...). Dùng x86_64.
-    ensure_for_abi(apk_path, cache_dir, "x86_64").or_else(|| ensure_for_abi(apk_path, cache_dir, "x86"))
+    // MuMu android 9 = x86_64 (abilist: x86_64,arm64-v8a,x86,...). Dùng x86_64.
+    ensure_for_abi(apk_path, cache_dir, "x86_64")
+        .or_else(|| ensure_for_abi(apk_path, cache_dir, "x86"))
 }
 
 /// Trần dung lượng ĐẶT TRƯỚC khi trích (libmagisk.so thật ~0.5MB) — không tin size

@@ -32,13 +32,13 @@ export function SettingsView() {
       <h1 className="mb-6 text-lg font-semibold">Settings</h1>
       <div className="max-w-2xl rounded-lg border border-border bg-surface px-6 shadow-soft">
         <Field
-          label="Đường dẫn MEmu"
-          hint="Tự dò nếu để trống. Trỏ tới THƯ MỤC cài MEmu (bản bất kỳ, kể cả Pro) hoặc file memuc.exe để chọn build muốn dùng."
+          label="Đường dẫn MuMu"
+          hint="Tự dò nếu để trống. Trỏ tới THƯ MỤC cài MuMu (bản bất kỳ, kể cả Pro) hoặc file MuMuManager.exe để chọn build muốn dùng."
         >
           <input
-            value={settings.memuPath ?? ''}
-            placeholder="Tự động dò… hoặc D:\...\MEmu"
-            onChange={(e) => void save({ memuPath: e.target.value || null })}
+            value={settings.mumuPath ?? ''}
+            placeholder="Tự động dò… hoặc D:\...\MuMu"
+            onChange={(e) => void save({ mumuPath: e.target.value || null })}
             className="h-9 w-72 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
           />
         </Field>
@@ -57,7 +57,7 @@ export function SettingsView() {
 
         <Field
           label="Magisk APK (khóa model)"
-          hint="Trỏ tới file Magisk-v30.x.apk. MPM trích resetprop để KHÓA model/fingerprint (chống MEmu ghi đè). Để trống = tắt khóa model."
+          hint="Trỏ tới file Magisk-v30.x.apk. MPM trích resetprop để KHÓA model/fingerprint (chống MuMu ghi đè). Để trống = tắt khóa model."
         >
           <input
             value={settings.magiskApkPath ?? ''}
@@ -79,7 +79,7 @@ export function SettingsView() {
           />
         </Field>
 
-        <Field label="Số lệnh song song tối đa" hint="Giới hạn tải khi bulk start/stop (Command Queue §8.3).">
+        <Field label="Số lệnh song song tối đa" hint="Giới hạn tải khi chạy/dừng nhiều profile.">
           <input
             type="number"
             min={1}
@@ -89,7 +89,6 @@ export function SettingsView() {
             className="h-9 w-32 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
           />
         </Field>
-
 
         <Field label="Giao diện">
           <div className="flex gap-2">

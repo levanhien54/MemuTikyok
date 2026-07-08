@@ -1,47 +1,167 @@
 # Kiến trúc MPM
 
-Tài liệu này tóm tắt các quyết định kiến trúc quan trọng để **dễ quản lý, sửa lỗi và nâng cấp**. Chi tiết đầy đủ: §8 trong [`../kehoac.md`](../kehoac.md).
+Tài liệu này là nguồn mô tả kiến trúc hiện tại của MPM sau khi chuyển sang mô hình
+**profile dùng một lần**.
 
-> **⚠️ 2026-07-05:** Mô hình hiện hành là **PROFILE dùng-một-lần** — profile = dữ liệu bền;
-> VM tạo mới mỗi lần Chạy rồi hủy khi Dừng (tối đa 5). Đã gỡ **warm pool + API
-> instance-centric + proxy + poller**. Biên IPC còn: 6 lệnh profile + `scan_emulator` +
-> `run_watch_session` + `get/save_settings`. Phần mô tả instance/poller/bulk bên dưới là
-> lịch sử. Xem [`E2E_RUNBOOK.md §8`](E2E_RUNBOOK.md) + [`BACKUP_RESTORE_DESIGN.md`](BACKUP_RESTORE_DESIGN.md).
+## Trạng thái hiện tại
+
+MPM quản lý **profile** chứ không quản lý VM bền vững.
+
+- Profile là dữ liệu bền: tài khoản, ghi chú, quốc gia yêu cầu, fingerprint, snapshot session.
+- VM là tài nguyên tạm: mỗi lần **Chạy** sẽ tạo VM sạch, áp fingerprint, cài TikTok nếu cần,
+  restore snapshot mới nhất, mở app; mỗi lần **Dừng** sẽ backup rồi hủy VM.
+- Giới hạn hiện tại: tối đa 5 profile chạy đồng thời.
+- Đã bỏ mô hình cũ: warm pool, bulk instance action, proxy per-VM, poller nền phát
+  event instance, API instance-centric.
 
 ## Nguyên tắc cốt lõi
-1. **Một biên giới tương tác OS duy nhất.** Mọi lệnh `memuc`/`adb` đi qua trait `MemucClient`. Không nơi nào khác trong code được spawn process MEmu. → dễ test, dễ thích ứng khi MEmu đổi format (R-07).
-2. **Nguồn sự thật của trạng thái là polling**, không phải kết quả lệnh (§7.2). Lệnh `memuc` bất đồng bộ; UI hiển thị Pending tới khi poller xác nhận.
-3. **UI không biết Tauri.** Frontend chỉ phụ thuộc interface `Backend` (`src/lib/backend.ts`). Có 2 hiện thực: `tauriBackend` (thật) và `mockBackend` (chạy độc lập/ test). Chọn tự động qua `isTauri()`.
-4. **Kiểm soát tải bằng Command Queue.** Bulk action đi qua `Semaphore(K)` để không làm treo host (R-01).
-5. **An toàn theo mặc định.** argv thay vì shell string (chống injection); validate input; Tauri capabilities tối thiểu.
 
-## Luồng dữ liệu
+1. **Tách profile khỏi VM.** Profile là nguồn dữ liệu bền; VM chỉ là môi trường chạy tạm.
+2. **Biên OS rõ ràng.** Lệnh vòng đời/cấu hình VM đi qua `EmulatorClient`; thao tác adb đi qua
+   `AdbWorker`. Không gọi shell nối chuỗi tùy tiện; mọi lệnh production dùng argv/command builder
+   có timeout.
+3. **Backup trước, hủy sau.** `teardown` chỉ remove VM sau khi backup, lưu blob snapshot, ghi DB
+   thành công. Nếu backup lỗi, VM vẫn được giữ để retry.
+4. **Fingerprint nhất quán theo profile.** Hardware profile sinh một lần khi tạo profile và được
+   áp lại ở mọi lần chạy.
+5. **Local-first.** SQLite và local snapshot store là implementation hiện tại; server/S3/lease là
+   hướng mở rộng sau.
+6. **Frontend không biết chi tiết Tauri/Rust.** UI chỉ dùng interface `Backend`; có Tauri backend
+   thật và mock backend để chạy độc lập trong browser.
+
+## Luồng Chạy/Dừng
+
+```text
+Create profile
+  -> lưu AccountProfile + HardwareProfile vào SQLite
+
+Run profile
+  -> kiểm tra country gate nếu có
+  -> reserve slot chạy
+  -> EmulatorClient.create
+  -> apply hardware qua MuMu simulation
+  -> EmulatorClient.start
+  -> AdbWorker.wait_boot_completed
+  -> push/resetprop nếu có Magisk APK
+  -> re-assert runtime fingerprint (wm size/density + android_id + resetprop)
+  -> debloat/harden best-effort
+  -> install TikTok APK nếu cấu hình hoặc file mặc định tồn tại
+  -> verify + restore snapshot mới nhất nếu có
+  -> re-assert runtime fingerprint nếu vừa install/restore
+  -> start TikTok
+  -> ghi running profile và last_run_at
+
+Stop profile
+  -> AdbWorker.backup
+  -> SnapshotStore.put
+  -> Db.record_snapshot trong transaction
+  -> retention prune
+  -> EmulatorClient.stop/remove
+  -> clear running profile
 ```
-UI (React) --invoke--> Tauri command --queue--> MemucClient --> memuc.exe
-                                                     |
-Poller (interval) ---------------------------------> |
-   |                                                 v
-   └── emit "instances:update" ---> Zustand store ---> UI cập nhật
-```
 
-## Ánh xạ FE ↔ BE
-| UI (TS)                     | Backend (Rust)                         |
-|-----------------------------|----------------------------------------|
-| `src/lib/backend.ts` (interface) | `src-tauri/src/memuc/mod.rs` (trait) |
-| `tauriBackend.ts` → `invoke` | `commands.rs` (`#[tauri::command]`)   |
-| `types/instance.ts`         | `model.rs` (serde camelCase)           |
-| event `instances:update`    | `poller.rs` → `app.emit(...)`          |
+## Thành phần chính
 
-> Kiểu dữ liệu hiện khai báo tay hai phía. **Nâng cấp đề xuất:** sinh types tự động từ Rust bằng `ts-rs` để loại lệch schema.
+| Lớp | File hiện tại | Vai trò |
+| --- | --- | --- |
+| Frontend contract | `src/lib/backend.ts` | Interface duy nhất UI dùng |
+| Tauri adapter | `src/lib/tauriBackend.ts` | Map `Backend` sang `invoke`/event |
+| Mock adapter | `src/lib/mockBackend.ts` | Dev/test UI không cần Tauri |
+| IPC commands | `src-tauri/src/commands.rs` | Adapter mỏng sang business logic |
+| Profile lifecycle | `src-tauri/src/profile_ops.rs` | Create/list/update/delete/run/stop profile |
+| Orchestrator | `src-tauri/src/orchestrator.rs` | Provision/teardown disposable VM |
+| Emulator trait | `src-tauri/src/emulator/mod.rs` | Lifecycle/config VM |
+| MuMu adapter | `src-tauri/src/emulator/mumu.rs` | Gọi `MuMuManager.exe` |
+| ADB trait | `src-tauri/src/adb.rs` | Backup/restore/app install/harden/scan |
+| SQLite | `src-tauri/src/db.rs` | Profile, snapshot, running VM reconcile |
+| Snapshot store | `src-tauri/src/snapshot.rs` | Nén, mã hóa, verify, retention blob |
+| App state | `src-tauri/src/state.rs` | Shared state, locks, in-memory running map |
 
-## Điểm mở rộng (nâng cấp tương lai)
-- **Module Automation:** thêm trait mới + entry trong sidebar; không đụng lõi memuc.
-- **Giả lập khác (LDPlayer…):** thêm hiện thực `MemucClient` mới, chọn theo settings.
-- **Persist settings:** `save_settings` hiện in-memory; nối vào file JSON ở app config dir.
-- **Virtualization:** danh sách đã tách `InstanceRow` memo hóa; gắn `@tanstack/react-virtual` khi số VM lớn.
+## IPC hiện tại
+
+Profile lifecycle:
+
+- `create_profile`
+- `list_profiles`
+- `update_profile`
+- `delete_profile`
+- `run_profile`
+- `stop_profile`
+
+Tiện ích trên VM đang chạy:
+
+- `scan_emulator`
+- `run_watch_session`
+- `upload_video_to_vm`
+
+Cài đặt/chẩn đoán:
+
+- `get_settings`
+- `save_settings`
+- `get_logs`
+
+## Mapping FE/BE
+
+| TypeScript | Rust |
+| --- | --- |
+| `src/types/instance.ts` | `src-tauri/src/model.rs` |
+| camelCase JSON | `#[serde(rename_all = "camelCase")]` |
+| `ProfileView.runningVm` | `ProfileView.running_vm` |
+| `AppSettings.mumuPath` | `AppSettings.mumu_path` |
+
+Các type vẫn khai báo tay hai phía. Hướng nâng cấp hợp lý là sinh type TS từ Rust bằng `ts-rs`
+hoặc schema generator tương đương để tránh lệch schema.
+
+## Runtime settings
+
+- `pollIntervalMs` áp dụng ngay trong frontend: `useProfileStore` khởi tạo lại interval khi settings đổi.
+- `maxConcurrency` áp dụng ngay trong backend: `save_settings` cập nhật `CommandQueue`; nếu giảm thấp hơn số tác vụ đang chạy thì tác vụ hiện tại chạy xong, tác vụ mới chờ theo limit mới.
+- `tiktokApkPath` được đọc ở mỗi lần `run_profile`, nên có hiệu lực ở lần chạy profile kế tiếp.
+- `magiskApkPath` được trích lại và set vào `AppState` ngay khi lưu settings.
+- `mumuPath` hiện chỉ dùng lúc khởi động để dựng `EmulatorClient`/`AdbWorker`; đổi đường dẫn được persist nhưng cần mở lại app để adapter production chuyển sang binary mới. Muốn áp dụng nóng cần refactor state sang adapter có thể reload.
+
+## MuMu/ADB
+
+- `EmulatorClient` dùng `MuMuManager.exe info -v all`, `clone`, `control launch/shutdown`,
+  `delete`, và `simulation`.
+- Fingerprint production dùng `MuMuManager.exe simulation -v <idx> -sk <key> -sv <value>`:
+  `imei`, `microvirt_vm_model`, `microvirt_vm_brand`, `microvirt_vm_manufacturer`,
+  `mac_address`, `enable_su`, `custom_resolution`.
+- Runtime fingerprint sau boot dùng ADB: `wm size/density`, `settings put secure android_id`,
+  và `resetprop` cho `ro.product.*`/`ro.build.fingerprint` nếu có Magisk APK.
+- `android_id` áp qua adb, không coi là khóa MuMuManager đáng tin cậy; Android 8+ SSAID/GMS
+  vẫn có thể cấp giá trị app-scoped khác sau khi TikTok chạy.
+- `AdbWorker` production dùng `MuMuManager.exe adb -v <idx> -c "<adb command>"`.
+
+## Đồng bộ trạng thái
+
+Không còn poller nền phát event instance. UI tự gọi `list_profiles` khi:
+
+- app khởi tạo,
+- user refresh,
+- focus cửa sổ,
+- polling nhẹ trong store frontend.
+
+`profile_ops::list` chỉ gọi emulator khi có profile đang chạy để reconcile VM đã biến mất ngoài
+luồng app.
+
+Khi app khởi động, `reconcile_startup` đọc bảng `running_vms`; VM nào còn sống từ phiên crash
+trước sẽ bị stop/remove và bảng running được dọn.
 
 ## Chiến lược test
-- **Parser** (`memuc/parser.rs`): pure function, phủ nhiều fixtures (§7.3).
-- **Queue** (`queue.rs`): kiểm chứng không vượt giới hạn song song.
-- **Mock adapter**: test logic command không cần MEmu (`cargo test --features mock-memuc`).
-- **Frontend**: Vitest cho helper/logic; (kế hoạch) Playwright + `tauri-driver` cho E2E.
+
+- Frontend: `npm run typecheck`, `npm run lint`, `npm run test`, `npm run build`.
+- Rust unit/integration nhẹ: `cargo test`.
+- Rust lint nghiêm: `cargo clippy --all-targets --all-features -- -D warnings`.
+- Mock emulator build: `cargo test --features mock-emulator`.
+- E2E thật MuMu: `cargo test --lib e2e_real -- --ignored --nocapture`.
+
+## Những giới hạn đã biết
+
+- MuMu x86 vẫn lộ native bridge/hypervisor; docs anti-detection coi đây là giới hạn nền tảng.
+- `android_id` có thể bị GMS/MuMu ghi đè sau khi cài/chạy TikTok; MPM re-apply trước start app
+  nhưng chưa khóa cứng SSAID mà TikTok thật sự nhìn thấy.
+- Country gate hiện kiểm IP thoát của host, không phải geo tách riêng từng VM.
+- `mumuPath` đổi trong Settings chưa reload adapter MuMu/ADB trong tiến trình đang chạy; mở lại app để dùng đường dẫn mới.
+- Server repository, cloud storage, proxy sticky per-account, lease/heartbeat vẫn là hướng mở rộng,
+  chưa phải code hiện tại.

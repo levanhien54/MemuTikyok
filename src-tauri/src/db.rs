@@ -1,9 +1,10 @@
-//! Persistence metadata bằng SQLite (rusqlite, bundled) — hiện thực yêu cầu
-//! "lưu vào cơ sở dữ liệu" cho quốc gia/ghi chú/thời gian khởi chạy/tài khoản.
+//! Persistence metadata bằng SQLite (rusqlite, bundled).
 //!
-//! Bảng `instance_meta` khóa theo `vm_index`. Account lưu dạng JSON, được
-//! **mã hóa AES-256-GCM** (tiền tố `enc:` + hex) khi có khóa — SEC-3 §9.
-//! Khóa cùng nguồn với snapshot (`crypto::load_or_create_key`).
+//! Nguồn chính hiện tại là `profiles` (account + hardware JSON), `snapshots`
+//! (metadata blob local) và `running_vms` (reconcile sau crash). Bảng
+//! `instance_meta` còn giữ để tương thích dữ liệu cũ theo `vm_index`.
+//! Account JSON được **mã hóa AES-256-GCM** (tiền tố `enc:` + hex) khi có khóa —
+//! SEC-3 §9. Khóa cùng nguồn với snapshot (`crypto::load_or_create_key`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -274,7 +275,10 @@ impl Db {
     /// Xóa bản ghi running của một profile (khi stop/delete/nhả chỗ).
     pub fn remove_running(&self, username: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM running_vms WHERE username=?1", params![username])?;
+        conn.execute(
+            "DELETE FROM running_vms WHERE username=?1",
+            params![username],
+        )?;
         Ok(())
     }
 
@@ -301,12 +305,13 @@ impl Db {
         meta: &SnapshotMeta,
         created_at: i64,
     ) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
             "UPDATE snapshots SET is_latest=0 WHERE account_key=?1",
             params![account_key],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT INTO snapshots
                 (account_key, storage_key, sha256, size_bytes, apk_version, created_at, is_latest)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
@@ -319,6 +324,7 @@ impl Db {
                 created_at
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 

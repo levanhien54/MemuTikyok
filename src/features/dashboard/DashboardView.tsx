@@ -2,15 +2,7 @@ import { useMemo } from 'react';
 import { Activity, Play, Users } from 'lucide-react';
 import { useProfileStore } from '@/store/useProfileStore';
 
-function StatCard({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-}) {
+function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
     <div className="rounded-lg border border-border bg-surface p-5 shadow-soft">
       <div className="flex items-center justify-between">
@@ -47,9 +39,9 @@ export function DashboardView() {
         <StatCard icon={<Activity size={18} />} label="Đang nghỉ" value={String(stats.idle)} />
       </div>
       <p className="mt-4 max-w-2xl text-sm text-fg-muted">
-        Kiến trúc <b>dùng-một-lần</b>: mỗi profile là dữ liệu bền (tài khoản + fingerprint); máy
-        ảo chỉ được cấp khi bấm <b>Chạy</b> và bị hủy khi <b>Dừng</b> (backup phiên trước). Tối đa
-        5 VM chạy đồng thời để bảo vệ RAM/đĩa.
+        Kiến trúc <b>dùng-một-lần</b>: mỗi profile là dữ liệu bền (tài khoản + fingerprint); máy ảo
+        chỉ được cấp khi bấm <b>Chạy</b> và bị hủy khi <b>Dừng</b> (backup phiên trước). Tối đa 5 VM
+        chạy đồng thời để bảo vệ RAM/đĩa.
       </p>
     </div>
   );

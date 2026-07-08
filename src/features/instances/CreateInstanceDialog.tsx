@@ -37,7 +37,13 @@ interface Props {
  * quốc gia yêu cầu và ghi chú. Dùng chung cho cả "Tạo VM" lẫn "Chỉnh sửa thông tin".
  * ⚠️ Dữ liệu nhạy cảm — che mật khẩu, không log, persist phải mã hóa (§9 SRS).
  */
-export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create', initial }: Props) {
+export function CreateInstanceDialog({
+  open,
+  onCancel,
+  onSubmit,
+  mode = 'create',
+  initial,
+}: Props) {
   const isEdit = mode === 'edit';
   const [form, setForm] = useState<AccountProfile>(EMPTY);
   const [note, setNote] = useState('');
@@ -125,7 +131,12 @@ export function CreateInstanceDialog({ open, onCancel, onSubmit, mode = 'create'
                   value={form.tiktokPassword}
                   onChange={set('tiktokPassword')}
                 />
-                <Input label="2FA (khóa/secret)" secret value={form.twoFa} onChange={set('twoFa')} />
+                <Input
+                  label="2FA (khóa/secret)"
+                  secret
+                  value={form.twoFa}
+                  onChange={set('twoFa')}
+                />
               </div>
 
               <Input

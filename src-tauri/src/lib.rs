@@ -1,5 +1,5 @@
-//! Điểm khởi tạo ứng dụng Tauri. Lắp ráp state, chọn adapter memuc, đăng ký
-//! command và khởi động poller nền.
+//! Điểm khởi tạo ứng dụng Tauri. Lắp ráp state, chọn adapter emulator, đăng ký
+//! command và reconcile trạng thái lúc khởi động.
 
 mod adb;
 mod commands;
@@ -7,13 +7,13 @@ mod crypto;
 mod db;
 #[cfg(test)]
 mod e2e_real;
+mod emulator;
 mod error;
 mod fingerprint;
 mod geo;
 mod humanize;
 mod logcap;
 mod magisk;
-mod memuc;
 mod model;
 mod orchestrator;
 mod profile_ops;
@@ -28,53 +28,54 @@ use std::sync::Arc;
 
 use adb::{AdbWorker, MockAdbWorker, RealAdbWorker};
 use db::Db;
+use emulator::{EmulatorClient, MockClient, MumuClient};
 use geo::{HttpGeolocator, IpGeolocator};
-use memuc::{MemucClient, MockMemuc, RealMemuc};
 use model::AppSettings;
 use snapshot::{LocalSnapshotStore, SnapshotStore};
 use state::{AppState, InstanceMeta};
 
-/// Chọn adapter: dùng MEmu thật nếu tìm thấy `memuc.exe`, ngược lại fallback mock
-/// (để UI vẫn chạy được khi máy chưa cài MEmu — R-03).
-fn build_memuc(settings: &AppSettings) -> Arc<dyn MemucClient> {
-    #[cfg(feature = "mock-memuc")]
+/// Chọn adapter: dùng MuMu thật nếu tìm thấy `MuMuManager.exe`, ngược lại fallback mock
+/// (để UI vẫn chạy được khi máy chưa cài MuMu — R-03).
+fn build_emulator(settings: &AppSettings) -> Arc<dyn EmulatorClient> {
+    #[cfg(feature = "mock-emulator")]
     {
-        tracing::info!("Dùng MockMemuc (feature mock-memuc bật)");
-        return Arc::new(MockMemuc::new());
+        let _ = settings;
+        tracing::info!("Dùng MockClient (feature mock-emulator bật)");
+        Arc::new(MockClient::new())
     }
 
-    #[cfg(not(feature = "mock-memuc"))]
+    #[cfg(not(feature = "mock-emulator"))]
     {
-        match resolve_memuc(&settings.memu_path) {
+        match resolve_emulator(&settings.mumu_path) {
             Some(p) => {
-                tracing::info!(path = %p.display(), "Dùng RealMemuc");
-                Arc::new(RealMemuc::new(p))
+                tracing::info!(path = %p.display(), "Dùng MumuClient");
+                Arc::new(MumuClient::new(p))
             }
             None => {
-                tracing::warn!("Không tìm thấy memuc.exe — tạm dùng MockMemuc");
-                Arc::new(MockMemuc::new())
+                tracing::warn!("Không tìm thấy MuMuManager.exe — tạm dùng MockClient");
+                Arc::new(MockClient::new())
             }
         }
     }
 }
 
-/// Giải đường dẫn tới `memuc.exe` từ setting: chấp nhận cả **thư mục cài MEmu**
-/// (bất kỳ bản nào, kể cả bản Pro) lẫn đường dẫn `memuc.exe` trực tiếp; nếu không
-/// có setting hợp lệ thì tự dò (discover). Cho phép trỏ tới build MEmu tùy chọn.
-fn resolve_memuc(setting: &Option<String>) -> Option<PathBuf> {
+/// Giải đường dẫn tới `MuMuManager.exe` từ setting: chấp nhận cả **thư mục cài MuMu**
+/// (bất kỳ bản nào, kể cả bản Pro) lẫn đường dẫn `MuMuManager.exe` trực tiếp; nếu không
+/// có setting hợp lệ thì tự dò (discover). Cho phép trỏ tới build MuMu tùy chọn.
+fn resolve_emulator(setting: &Option<String>) -> Option<PathBuf> {
     if let Some(s) = setting.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let p = PathBuf::from(s);
-        // Trỏ thẳng memuc.exe.
+        // Trỏ thẳng MuMuManager.exe.
         if p.is_file() {
             return Some(p);
         }
-        // Trỏ thư mục cài → <dir>/memuc.exe.
-        let candidate = p.join("memuc.exe");
+        // Trỏ thư mục cài → <dir>/MuMuManager.exe.
+        let candidate = p.join("MuMuManager.exe");
         if candidate.exists() {
             return Some(candidate);
         }
     }
-    RealMemuc::discover()
+    MumuClient::discover()
 }
 
 /// Thư mục dữ liệu ứng dụng: %APPDATA%\com.mpm.manager (Windows).
@@ -98,13 +99,19 @@ fn settings_path() -> Option<PathBuf> {
 
 /// Nạp settings từ đĩa (fallback mặc định) — giữ cấu hình qua các lần chạy.
 fn load_settings() -> AppSettings {
-    settings_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<AppSettings>(&s).ok())
-        .unwrap_or_default()
+    let p = match settings_path() {
+        Some(p) => p,
+        None => return AppSettings::default(),
+    };
+    if let Ok(data) = std::fs::read_to_string(&p) {
+        if let Ok(s) = serde_json::from_str(&data) {
+            return s;
+        }
+    }
+    AppSettings::default()
 }
 
-/// Ghi settings ra đĩa (gọi từ save_settings).
+/// Ghi settings xuống đĩa. Dùng khi user update từ UI.
 pub(crate) fn persist_settings(settings: &AppSettings) {
     if let Some(p) = settings_path() {
         if let Ok(json) = serde_json::to_string_pretty(settings) {
@@ -115,12 +122,12 @@ pub(crate) fn persist_settings(settings: &AppSettings) {
     }
 }
 
-/// Chọn ADB Worker: dùng memuc thật nếu có, ngược lại Mock (dev/test).
+/// Chọn ADB Worker: dùng MuMuManager thật nếu có, ngược lại Mock (dev/test).
 fn build_adb(settings: &AppSettings) -> Arc<dyn AdbWorker> {
-    match resolve_memuc(&settings.memu_path) {
+    match resolve_emulator(&settings.mumu_path) {
         Some(p) => Arc::new(RealAdbWorker::new(p)),
         None => {
-            tracing::warn!("Không tìm thấy memuc — ADB Worker dùng Mock");
+            tracing::warn!("Không tìm thấy emulator — ADB Worker dùng Mock");
             Arc::new(MockAdbWorker::new())
         }
     }
@@ -178,31 +185,30 @@ pub(crate) fn init_magisk_bin(settings: &AppSettings) -> Option<PathBuf> {
     }
     let cache = data_dir()?.join("magisk");
     match crate::magisk::ensure_binary(apk, &cache) {
-        Some(bin) => {
-            tracing::info!(bin = %bin.display(), "Đã trích binary magisk (resetprop) từ APK");
-            Some(bin)
+        Some(p) => {
+            tracing::info!(path = %p.display(), "Sẵn sàng resetprop từ Magisk");
+            Some(p)
         }
         None => {
-            tracing::warn!(apk, "Không trích được libmagisk.so từ APK — bỏ qua khóa model");
+            tracing::warn!("Không trích được resetprop từ APK — bỏ qua khóa model");
             None
         }
     }
 }
 
-/// Mở SQLite và nạp metadata; trả về (db, metadata). Lỗi → fallback chỉ-bộ-nhớ.
-fn init_db() -> (Option<Db>, HashMap<u32, InstanceMeta>) {
-    let Some(path) = db_path() else {
-        return (None, HashMap::new());
-    };
-    match Db::open_with_key(&path, load_enc_key()) {
-        Ok(db) => {
+/// Khởi tạo SQLite DB + lấy InstanceMeta nếu có.
+fn init_db(key: Option<crypto::Key32>) -> (Option<Db>, HashMap<u32, InstanceMeta>) {
+    match db_path() {
+        Some(p) => {
+            let db = Db::open_with_key(&p, key).expect("không mở được DB");
             let meta = db.load_all().unwrap_or_default();
-            tracing::info!(path = %path.display(), rows = meta.len(), "Đã mở SQLite metadata");
             (Some(db), meta)
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "Không mở được SQLite — dùng bộ nhớ tạm");
-            (None, HashMap::new())
+        None => {
+            tracing::warn!("Không có data_dir, dùng DB trong RAM");
+            let db = Db::open_with_key(std::path::Path::new(":memory:"), None)
+                .expect("không mở được in-memory DB");
+            (Some(db), HashMap::new())
         }
     }
 }
@@ -214,16 +220,20 @@ pub fn run() {
     let log_buffer = logcap::init();
 
     let settings = load_settings();
-    let memuc = build_memuc(&settings);
+    let emulator = build_emulator(&settings);
     // Tra IP→quốc gia thật qua ip-api.com (free, HTTP). Cache theo IP.
     let geo: Arc<dyn IpGeolocator> = Arc::new(HttpGeolocator::new());
     let adb = build_adb(&settings);
+
+    // Khoá mã hoá cho DB và snapshot
+    let enc_key = load_enc_key();
+
     let store = build_store();
-    let (db, metadata) = init_db();
+    let (db, metadata) = init_db(enc_key);
     // Trích binary magisk TRƯỚC khi move `settings` vào AppState.
     let magisk_bin = init_magisk_bin(&settings);
     let app_state: state::SharedState = Arc::new(AppState::new(
-        memuc, geo, adb, store, settings, db, metadata,
+        emulator, geo, adb, store, settings, db, metadata,
     ));
     app_state.set_magisk_bin(magisk_bin);
     let reconcile_state = app_state.clone();
@@ -249,17 +259,18 @@ pub fn run() {
             commands::create_profile,
             commands::list_profiles,
             commands::update_profile,
+            commands::delete_profile,
             commands::run_profile,
             commands::stop_profile,
-            commands::delete_profile,
-            // Tiện ích trên VM đang chạy của profile.
             commands::scan_emulator,
             commands::run_watch_session,
-            // Cài đặt + chẩn đoán.
+            commands::upload_video_to_vm,
+            // Settings
             commands::get_settings,
             commands::save_settings,
+            // Logs
             commands::get_logs,
         ])
         .run(tauri::generate_context!())
-        .expect("Lỗi khởi chạy ứng dụng MPM");
+        .expect("Lỗi chạy tauri app");
 }
