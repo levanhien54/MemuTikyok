@@ -6,6 +6,7 @@ import type {
   SessionReport,
   Profile,
   ProfileView,
+  RunProfileResult,
 } from '@/types/instance';
 
 /** Sinh fingerprint mô phỏng, tất định theo tên tài khoản (cho UI demo). */
@@ -21,6 +22,11 @@ function mockFingerprint(title: string): HardwareProfile {
       resWidth: 1080,
       resHeight: 1920,
       dpi: 480,
+      socHardware: '',
+      boardPlatform: '',
+      gpuEgl: 'mali',
+      securityPatch: '2018-11-01',
+      buildCharacteristics: '',
     },
     {
       model: 'SM-G960F',
@@ -32,6 +38,11 @@ function mockFingerprint(title: string): HardwareProfile {
       resWidth: 1080,
       resHeight: 2220,
       dpi: 480,
+      socHardware: '',
+      boardPlatform: '',
+      gpuEgl: 'mali',
+      securityPatch: '2021-10-01',
+      buildCharacteristics: '',
     },
     {
       model: 'Redmi Note 8',
@@ -43,6 +54,11 @@ function mockFingerprint(title: string): HardwareProfile {
       resWidth: 1080,
       resHeight: 2340,
       dpi: 440,
+      socHardware: 'qcom',
+      boardPlatform: '',
+      gpuEgl: 'adreno',
+      securityPatch: '2021-05-01',
+      buildCharacteristics: '',
     },
   ];
   let h = 0;
@@ -152,8 +168,19 @@ export function createMockBackend(): Backend {
       p.country = country?.trim().toUpperCase() || null;
       saveProfiles(profiles);
     },
-    async runProfile(username) {
-      if (runningProfiles[username] != null) return runningProfiles[username]!;
+    async runProfile(username): Promise<RunProfileResult> {
+      const result = (vmIndex: number): RunProfileResult => ({
+        vmIndex,
+        health: {
+          fingerprintLock: {
+            attempted: true,
+            locked: false,
+            message: 'Mock backend: chua co Magisk/resetprop de khoa model/fingerprint',
+          },
+          fixableTells: ['Magisk/resetprop (khóa model)'],
+        },
+      });
+      if (runningProfiles[username] != null) return result(runningProfiles[username]!);
       // Cổng quốc gia (khớp backend thật): IP thoát mô phỏng phải khớp quốc gia yêu cầu.
       const expected = profiles[username]?.country;
       if (expected && expected.toUpperCase() !== MOCK_EGRESS_COUNTRY) {
@@ -169,7 +196,7 @@ export function createMockBackend(): Backend {
         profiles[username].lastRunAt = Date.now();
         saveProfiles(profiles);
       }
-      return vm;
+      return result(vm);
     },
     async stopProfile(username) {
       if (runningProfiles[username] == null) return null;

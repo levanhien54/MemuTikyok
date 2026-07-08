@@ -8,6 +8,7 @@
 //! Khóa này dùng chung cho cả snapshot lẫn `account_json` (credential) trong DB.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -27,7 +28,12 @@ fn rand_bytes(buf: &mut [u8]) -> AppResult<()> {
 /// Windows hiện tại) trước khi ghi đĩa — SEC-3. Nếu file cũ là khóa trần 32 byte
 /// (bản trước), nó vẫn được nhận và **tự nâng cấp** lên dạng DPAPI ở lần ghi này.
 pub fn load_or_create_key(path: &Path) -> AppResult<Key32> {
-    if let Ok(bytes) = fs::read(path) {
+    let existing = match fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    if let Some(bytes) = existing {
         // Ưu tiên: file là blob DPAPI → gỡ bọc ra 32 byte.
         if let Some(plain) = dpapi_unprotect(&bytes) {
             if plain.len() == 32 {
@@ -41,10 +47,14 @@ pub fn load_or_create_key(path: &Path) -> AppResult<Key32> {
             let mut k = [0u8; 32];
             k.copy_from_slice(&bytes);
             if let Some(wrapped) = dpapi_protect(&k) {
-                let _ = fs::write(path, &wrapped); // best-effort nâng cấp
+                let _ = atomic_write(path, &wrapped); // best-effort nâng cấp
             }
             return Ok(k);
         }
+        return Err(AppError::Io(format!(
+            "file khóa {} không hợp lệ; không tự sinh khóa mới để tránh mất dữ liệu cũ",
+            path.display()
+        )));
     }
     let mut k = [0u8; 32];
     rand_bytes(&mut k)?;
@@ -53,11 +63,33 @@ pub fn load_or_create_key(path: &Path) -> AppResult<Key32> {
     }
     // Bọc DPAPI nếu được; nếu không (không phải Windows / lỗi) thì ghi trần.
     let to_write = dpapi_protect(&k).unwrap_or_else(|| k.to_vec());
-    fs::write(path, to_write)?;
+    atomic_write(path, &to_write)?;
     Ok(k)
 }
 
 // ── Windows DPAPI (CryptProtectData/Unprotect) qua FFI trực tiếp, không thêm crate ──
+fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)?;
+        if let Some(parent) = path.parent() {
+            let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
+        }
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 mod dpapi {
     use core::ffi::c_void;

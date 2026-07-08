@@ -1,5 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
+import { useRef } from 'react';
 import { Button } from './Button';
+import { useModalFocusTrap } from './useModalFocusTrap';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -24,6 +26,9 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useModalFocusTrap(open, dialogRef, onCancel);
+
   return (
     <AnimatePresence>
       {open && (
@@ -35,8 +40,10 @@ export function ConfirmDialog({
           onClick={onCancel}
         >
           <motion.div
+            ref={dialogRef}
             role="dialog"
             aria-modal="true"
+            tabIndex={-1}
             className="w-full max-w-md rounded-lg border border-border bg-surface p-6 shadow-soft"
             initial={{ scale: 0.95, y: 8 }}
             animate={{ scale: 1, y: 0 }}

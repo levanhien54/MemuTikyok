@@ -50,7 +50,7 @@ pub trait AdbWorker: Send + Sync {
     async fn disable_app(&self, idx: u32, pkg: &str) -> AppResult<()>;
     /// Scan dấu vết emulator (native check qua adb) → báo cáo từng mục.
     async fn scan_emulator_tells(&self, idx: u32) -> AppResult<Vec<EmulatorTell>>;
-    /// Ẩn/sửa các dấu vết SỬA ĐƯỢC (best-effort; ro.* cần reboot mới ăn).
+    /// Ẩn/sửa các dấu vết runtime best-effort; ro.* được xử lý bằng resetprop trong lock_device_identity.
     async fn harden(&self, idx: u32) -> AppResult<()>;
     /// Đẩy binary `magisk` (chứa applet resetprop, trích từ Magisk APK) vào VM tại
     /// `/data/local/tmp/magisk` + chmod + verify (`magisk -c`). VM đã có root (enable_su)
@@ -74,6 +74,75 @@ pub trait AdbWorker: Send + Sync {
     /// Nạp file media (video, ảnh) từ máy tính vào máy ảo (Mục Camera)
     /// và gọi broadcast quét media để xuất hiện ngay trong thư viện.
     async fn upload_media(&self, idx: u32, local_path: &str) -> AppResult<()>;
+}
+
+fn sh_escape(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+fn build_lock_script(rp: &str, hw: &HardwareProfile) -> String {
+    let mut script = String::from("#!/system/bin/sh\n");
+
+    for p in ["ro.kernel.qemu", "ro.boot.qemu", "ro.mumu.version"] {
+        script.push_str(&format!("{rp} --delete {p}\n"));
+    }
+
+    let core: [(&str, &str); 7] = [
+        ("ro.product.model", &hw.model),
+        ("ro.product.brand", &hw.brand),
+        ("ro.product.manufacturer", &hw.manufacturer),
+        ("ro.product.device", &hw.device),
+        ("ro.product.name", &hw.device),
+        ("ro.build.fingerprint", &hw.build_fingerprint),
+        ("ro.product.board", &hw.device),
+    ];
+    for (key, val) in core {
+        if !val.is_empty() {
+            script.push_str(&format!("{rp} {key} '{}'\n", sh_escape(val)));
+        }
+    }
+
+    let coherent: [(&str, &str); 5] = [
+        ("ro.hardware", &hw.soc_hardware),
+        ("ro.board.platform", &hw.board_platform),
+        ("ro.hardware.egl", &hw.gpu_egl),
+        ("ro.build.version.security_patch", &hw.security_patch),
+        ("ro.build.characteristics", &hw.build_characteristics),
+    ];
+    for (key, val) in coherent {
+        if val.is_empty() {
+            if key == "ro.build.characteristics" {
+                script.push_str(&format!("{rp} --delete {key}\n"));
+            }
+            continue;
+        }
+        script.push_str(&format!("{rp} {key} '{}'\n", sh_escape(val)));
+    }
+
+    for (key, val) in [
+        ("ro.build.tags", "release-keys"),
+        ("ro.build.type", "user"),
+        ("ro.secure", "1"),
+        ("ro.debuggable", "0"),
+    ] {
+        script.push_str(&format!("{rp} {key} '{val}'\n"));
+    }
+    script.push_str(&format!("{rp} sys.usb.state 'mtp'\n"));
+
+    for f in [
+        "/dev/qemu_pipe",
+        "/dev/socket/qemud",
+        "/dev/socket/genyd",
+        "/system/lib/vboxguest.ko",
+        "/system/bin/nemuVM-tools",
+        "/system/xbin/nemuVM-tools",
+    ] {
+        script.push_str(&format!(
+            "if [ -e {f} ]; then mount -o bind /dev/null {f}; fi\n"
+        ));
+    }
+
+    script
 }
 
 // ------------------------ Real (MuMuManager adb) ------------------------
@@ -212,6 +281,27 @@ fn tar_archive_looks_valid(path: &Path) -> AppResult<bool> {
     }
 
     Ok(false)
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn safe_remote_media_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len().max(1));
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ' ') {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    let trimmed = out.trim_matches([' ', '.']).trim();
+    if trimmed.is_empty() {
+        "media.bin".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[async_trait]
@@ -633,7 +723,7 @@ impl AdbWorker for RealAdbWorker {
             // detected=true = CÓ VẤN ĐỀ: thiếu resetprop → model KHÔNG khóa được.
             detected: !has_resetprop,
             detail: if has_resetprop {
-                "có resetprop — khóa được model/android_id".into()
+                "co resetprop - khoa duoc model/fingerprint/characteristics runtime".into()
             } else {
                 "THIẾU — model bị MuMu ghi đè (đặt Magisk APK trong Cài đặt)".into()
             },
@@ -645,15 +735,8 @@ impl AdbWorker for RealAdbWorker {
     async fn harden(&self, idx: u32) -> AppResult<()> {
         // Xóa prop camera giả (runtime-settable).
         let _ = self.adb(idx, "shell setprop qemu.sf.fake_camera ''").await;
-        // Sửa ro.build.characteristics qua build.prop (cần root + remount; ăn sau reboot).
-        let _ = self
-            .adb(
-                idx,
-                "shell su -c \"mount -o rw,remount /system; sed -i 's/ro.build.characteristics=tablet/ro.build.characteristics=default/' /system/build.prop\"",
-            )
-            .await;
         // Ẩn thư mục Share của MuMu ($MuMu12Shared) và biến thể cũ.
-        let _ = self.adb(idx, "shell su -c 'umount /mnt/shared; umount /sdcard/$MuMu12Shared; umount /storage/emulated/0/$MuMu12Shared; umount /sdcard/Android/data/com.microvirt.tools/files'").await;
+        let _ = self.adb(idx, "shell su -c 'for p in /mnt/shared \"/sdcard/\\$MuMu12Shared\" \"/storage/emulated/0/\\$MuMu12Shared\" /sdcard/Android/data/com.microvirt.tools/files; do mountpoint -q \"$p\" && umount \"$p\"; done'").await;
 
         // Giả lập pin: rút sạc AC/USB, set mức pin ngẫu nhiên
         let mut rng = crate::humanize::Rng::from_entropy();
@@ -730,77 +813,30 @@ impl AdbWorker for RealAdbWorker {
             );
             return Ok(false);
         };
-        let props: [(&str, &str); 9] = [
-            ("ro.product.model", &hw.model),
-            ("ro.product.brand", &hw.brand),
-            ("ro.product.manufacturer", &hw.manufacturer),
-            ("ro.product.device", &hw.device),
-            ("ro.product.name", &hw.device),
-            ("ro.build.fingerprint", &hw.build_fingerprint),
-            ("ro.board.platform", &hw.manufacturer),
-            ("ro.hardware", &hw.device),
-            ("ro.product.board", &hw.device),
-        ];
         // KHÔNG chạy từng `su -c 'resetprop KEY "VAL"'`: value CÓ KHOẢNG TRẮNG (vd
         // "Redmi Note 8") bị adb-shell tách lại qua 3 tầng sh → resetprop nhận 3 tham số,
         // model KHÔNG khóa (kiểm chứng thực). Thay vào: SINH script, đẩy vào VM, chạy bằng
         // `sh <file>` — sh đọc nháy kép TỪ FILE nên value giữ nguyên (kiểm chứng: model
         // "Redmi Note 8" khóa đúng). `resetprop -f` bị SELinux chặn đọc file → không dùng.
-        let mut script = String::from("#!/system/bin/sh\n");
+        let script = build_lock_script(&rp, hw);
 
         // 1. Xóa các prop đặc trưng của QEMU và MuMu
-        for p in ["ro.kernel.qemu", "ro.boot.qemu", "ro.mumu.version"] {
-            script.push_str(&format!("{rp} --delete {p}\n"));
-        }
-
         // 2. Set các prop cơ bản của phần cứng
-        for (key, val) in props {
-            if val.is_empty() {
-                continue;
-            }
-            let esc = val.replace('\'', "'\\''");
-            script.push_str(&format!("{rp} {key} '{esc}'\n"));
-        }
-
         // 3. Set các prop để giả mạo Build Type (tránh userdebug/test-keys)
-        let build_props: [(&str, &str); 5] = [
-            ("ro.build.tags", "release-keys"),
-            ("ro.build.type", "user"),
-            ("ro.secure", "1"),
-            ("ro.debuggable", "0"),
-            ("ro.hardware.egl", "adreno"), // Hoặc "mali"
-        ];
-        for (key, val) in build_props {
-            script.push_str(&format!("{rp} {key} '{val}'\n"));
-        }
         // Ẩn ADB (USB debug)
-        script.push_str(&format!("{rp} sys.usb.state 'mtp'\n"));
-
         // 4. Ẩn các file/device node máy ảo (bằng cách dùng bind mount đè /dev/null lên)
-        let hide_files = [
-            "/dev/qemu_pipe",
-            "/dev/socket/qemud",
-            "/dev/socket/genyd",
-            "/system/lib/vboxguest.ko",
-            "/system/bin/nemuVM-tools",
-            "/system/xbin/nemuVM-tools",
-        ];
-        for f in hide_files {
-            // Chỉ mount đè nếu file tồn tại
-            script.push_str(&format!(
-                "if [ -e {f} ]; then mount -o bind /dev/null {f}; fi\n"
-            ));
-        }
-
         let host = std::env::temp_dir().join(format!("mpm-lock-{idx}.sh"));
         if let Err(e) = fs::write(&host, script.as_bytes()) {
             tracing::warn!(idx, error = %e, "Không ghi được script khóa model tạm");
             return Ok(false);
         }
         let remote = "/data/local/tmp/mpm-lock.sh";
-        let pushed = self
-            .adb_args(idx, &["push", host.to_str().unwrap(), remote])
-            .await;
+        let Some(host_str) = host.to_str() else {
+            let _ = fs::remove_file(&host);
+            tracing::warn!(idx, "Duong dan temp script khong phai UTF-8");
+            return Ok(false);
+        };
+        let pushed = self.adb_args(idx, &["push", host_str, remote]).await;
         let _ = fs::remove_file(&host);
         if pushed.is_err() {
             tracing::warn!(idx, "Không đẩy được script khóa model vào VM");
@@ -813,18 +849,24 @@ impl AdbWorker for RealAdbWorker {
             let _ = self.adb(idx, &format!("shell su -c 'sh {remote}'")).await;
             let model_ok = self.prop(idx, "ro.product.model").await == hw.model;
             let fp_ok = self.prop(idx, "ro.build.fingerprint").await == hw.build_fingerprint;
-            if model_ok && fp_ok {
+            let characteristics = self.prop(idx, "ro.build.characteristics").await;
+            let characteristics_ok = if hw.build_characteristics.is_empty() {
+                !characteristics.contains("tablet")
+            } else {
+                characteristics == hw.build_characteristics
+            };
+            if model_ok && fp_ok && characteristics_ok {
                 let _ = self
                     .adb(idx, &format!("shell su -c 'rm -f {remote}'"))
                     .await;
-                tracing::info!(idx, model = %hw.model, "Đã KHÓA model + fingerprint qua resetprop (script)");
+                tracing::info!(idx, model = %hw.model, "Da KHOA model + fingerprint + characteristics qua resetprop (script)");
                 return Ok(true);
             }
         }
         let _ = self
             .adb(idx, &format!("shell su -c 'rm -f {remote}'"))
             .await;
-        tracing::warn!(idx, model = %hw.model, "Khóa model/fingerprint KHÔNG verify được sau 2 lần");
+        tracing::warn!(idx, model = %hw.model, "Khoa model/fingerprint/characteristics KHONG verify duoc sau 2 lan");
         Ok(false)
     }
 
@@ -865,19 +907,27 @@ impl AdbWorker for RealAdbWorker {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("video.mp4");
+        let remote_name = safe_remote_media_name(name);
         // Tạo thư mục nếu chưa có
         let _ = self
             .adb(idx, "shell su -c 'mkdir -p /sdcard/DCIM/Camera'")
             .await;
 
-        let remote_path = format!("/sdcard/DCIM/Camera/{name}");
+        let remote_path = format!("/sdcard/DCIM/Camera/{remote_name}");
         self.adb_args(idx, &["push", local_path, &remote_path])
             .await?;
 
         // Gửi broadcast để hệ điều hành quét lại thư viện media
-        self.adb(idx, &format!("shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d file://{remote_path}")).await?;
+        let uri = shell_quote(&format!("file://{remote_path}"));
+        self.adb(
+            idx,
+            &format!(
+                "shell am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {uri}"
+            ),
+        )
+        .await?;
 
-        tracing::info!(idx, file = %name, "Đã đẩy file media vào VM và quét thư viện");
+        tracing::info!(idx, file = %remote_name, "Đã đẩy file media vào VM và quét thư viện");
         Ok(())
     }
 }
@@ -1120,6 +1170,53 @@ mod tests {
 
     fn tmp(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("mpm_adb_{}_{tag}.bin", std::process::id()))
+    }
+
+    fn hw_lock() -> HardwareProfile {
+        HardwareProfile {
+            model: "Redmi Note 8".into(),
+            brand: "Redmi".into(),
+            manufacturer: "Xiaomi".into(),
+            imei: "861000000000000".into(),
+            android_id: "a1b2c3d4e5f60718".into(),
+            mac: "02:00:00:11:22:33".into(),
+            res_width: 1080,
+            res_height: 2340,
+            dpi: 440,
+            device: "ginkgo".into(),
+            build_fingerprint:
+                "Redmi/ginkgo/ginkgo:11/RP1A.200720.011/V12.5.1.0.RCOMIXM:user/release-keys".into(),
+            soc_hardware: "qcom".into(),
+            board_platform: "trinket".into(),
+            gpu_egl: "adreno".into(),
+            security_patch: "2021-05-01".into(),
+            build_characteristics: "".into(),
+        }
+    }
+
+    #[test]
+    fn build_lock_script_giu_gia_tri_co_khoang_trang_va_coherent() {
+        let s = build_lock_script("magisk resetprop", &hw_lock());
+        assert!(
+            s.contains("magisk resetprop ro.product.model 'Redmi Note 8'"),
+            "{s}"
+        );
+        assert!(s.contains("magisk resetprop ro.hardware 'qcom'"));
+        assert!(s.contains("magisk resetprop ro.board.platform 'trinket'"));
+        assert!(s.contains("magisk resetprop ro.hardware.egl 'adreno'"));
+        assert!(s.contains("magisk resetprop ro.build.version.security_patch '2021-05-01'"));
+        assert!(s.contains("magisk resetprop --delete ro.build.characteristics"));
+        assert!(!s.contains("tablet"), "khong duoc de lai tell tablet");
+
+        let hw_empty = HardwareProfile {
+            soc_hardware: String::new(),
+            ..hw_lock()
+        };
+        let s2 = build_lock_script("resetprop", &hw_empty);
+        assert!(
+            !s2.contains("resetprop ro.hardware '"),
+            "rong phai bo qua, khong set"
+        );
     }
 
     #[tokio::test]

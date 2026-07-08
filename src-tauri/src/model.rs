@@ -42,6 +42,21 @@ pub struct HardwareProfile {
     /// Áp qua resetprop/build.prop sau boot (emulator không set được trường này).
     #[serde(default)]
     pub build_fingerprint: String,
+    /// ro.hardware (SoC family). Rong = khong set.
+    #[serde(default)]
+    pub soc_hardware: String,
+    /// ro.board.platform. Rong = khong set.
+    #[serde(default)]
+    pub board_platform: String,
+    /// ro.hardware.egl ("mali"/"adreno"). Rong = khong set.
+    #[serde(default)]
+    pub gpu_egl: String,
+    /// ro.build.version.security_patch ("YYYY-MM-DD"). Rong = khong set.
+    #[serde(default)]
+    pub security_patch: String,
+    /// ro.build.characteristics cua model that. Rong = xoa prop tablet cua MuMu.
+    #[serde(default)]
+    pub build_characteristics: String,
 }
 
 impl HardwareProfile {
@@ -130,6 +145,64 @@ pub struct ProfileView {
     pub profile: Profile,
     /// vm_index đang chạy profile (None = idle, chưa chạy).
     pub running_vm: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintLockStatus {
+    pub attempted: bool,
+    pub locked: bool,
+    pub message: String,
+}
+
+impl FingerprintLockStatus {
+    pub fn not_attempted() -> Self {
+        Self {
+            attempted: false,
+            locked: false,
+            message: "Chua thu khoa model/fingerprint trong phien nay".into(),
+        }
+    }
+
+    pub fn locked() -> Self {
+        Self {
+            attempted: true,
+            locked: true,
+            message: "Da khoa model/build fingerprint runtime".into(),
+        }
+    }
+
+    pub fn missing_magisk() -> Self {
+        Self {
+            attempted: true,
+            locked: false,
+            message:
+                "Chua khoa duoc model/fingerprint: thieu resetprop/Magisk APK hoac verify khong dat"
+                    .into(),
+        }
+    }
+
+    pub fn failed(error: impl std::fmt::Display) -> Self {
+        Self {
+            attempted: true,
+            locked: false,
+            message: format!("Khoa model/fingerprint loi: {error}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProfileResult {
+    pub vm_index: u32,
+    pub health: ProvisionHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisionHealth {
+    pub fingerprint_lock: FingerprintLockStatus,
+    pub fixable_tells: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

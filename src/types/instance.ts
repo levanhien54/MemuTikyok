@@ -27,6 +27,11 @@ export interface HardwareProfile {
   /** Optional for profiles created before these fields existed. */
   device?: string;
   buildFingerprint?: string;
+  socHardware?: string;
+  boardPlatform?: string;
+  gpuEgl?: string;
+  securityPatch?: string;
+  buildCharacteristics?: string;
 }
 
 export interface Profile {
@@ -42,6 +47,22 @@ export interface Profile {
 export interface ProfileView {
   profile: Profile;
   runningVm: number | null;
+}
+
+export interface FingerprintLockStatus {
+  attempted: boolean;
+  locked: boolean;
+  message: string;
+}
+
+export interface ProvisionHealth {
+  fingerprintLock: FingerprintLockStatus;
+  fixableTells: string[];
+}
+
+export interface RunProfileResult {
+  vmIndex: number;
+  health: ProvisionHealth;
 }
 
 export interface EmulatorTell {

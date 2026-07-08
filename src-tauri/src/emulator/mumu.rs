@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
@@ -43,11 +44,23 @@ impl MumuClient {
             r"Program Files\Netease\MuMuPlayer-12.0\shell",
             r"Program Files (x86)\Netease\MuMuPlayer-12.0\shell",
             r"Netease\MuMuPlayer-12.0\shell",
+            r"Program Files\Microvirt\MuMuPlayer-12.0\shell",
+            r"Program Files (x86)\Microvirt\MuMuPlayer-12.0\shell",
+            r"Microvirt\MuMuPlayer-12.0\shell",
             r"Program Files\Netease\MuMuPlayer\nx_main",
             r"Program Files (x86)\Netease\MuMuPlayer\nx_main",
             r"Netease\MuMuPlayer\nx_main",
+            r"Program Files\Microvirt\MuMuPlayer\nx_main",
+            r"Program Files (x86)\Microvirt\MuMuPlayer\nx_main",
+            r"Microvirt\MuMuPlayer\nx_main",
+            r"Microvirt\MuMu",
+            r"Program Files\Microvirt\MuMu",
+            r"Program Files (x86)\Microvirt\MuMu",
         ];
-        for drive in ['C', 'D', 'E', 'F'] {
+        for drive in 'A'..='Z' {
+            if !PathBuf::from(format!(r"{drive}:\")).exists() {
+                continue;
+            }
             for sub in SUBDIRS {
                 let candidate = PathBuf::from(format!(r"{drive}:\{sub}\MuMuManager.exe"));
                 if candidate.exists() {
@@ -92,8 +105,68 @@ impl MumuClient {
                 stderr
             }));
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if let Some(msg) = mumu_stdout_error(&stdout) {
+            return Err(AppError::CommandFailed(msg));
+        }
+        Ok(stdout)
     }
+}
+
+fn mumu_stdout_error(stdout: &str) -> Option<String> {
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
+        return has_negative_errcode(&json).then(|| trimmed.to_string());
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("\"errcode\":-")
+        || lower.contains("\"errcode\": -")
+        || lower.contains("errcode:-")
+        || lower.contains("errcode=-")
+        || first_stdout_token_is_error(&lower)
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
+}
+
+fn has_negative_errcode(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                let key = key.to_ascii_lowercase();
+                if matches!(key.as_str(), "errcode" | "err_code" | "error_code")
+                    && value.as_i64().is_some_and(|code| code < 0)
+                {
+                    return true;
+                }
+                if has_negative_errcode(value) {
+                    return true;
+                }
+            }
+            false
+        }
+        Value::Array(items) => items.iter().any(has_negative_errcode),
+        _ => false,
+    }
+}
+
+fn first_stdout_token_is_error(lower: &str) -> bool {
+    let Some(line) = lower.lines().map(str::trim).find(|line| !line.is_empty()) else {
+        return false;
+    };
+    let token = line
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    matches!(token, "error" | "failed" | "fail")
 }
 
 fn command_error(e: std::io::Error) -> AppError {
@@ -127,7 +200,7 @@ fn simulation_config(key: &str, value: &str) -> Option<(String, String)> {
 impl EmulatorClient for MumuClient {
     async fn list_instances(&self) -> AppResult<Vec<Instance>> {
         let stdout = self.run(&["info", "-v", "all"]).await?;
-        Ok(parse_mumu_info(&stdout))
+        parse_mumu_info(&stdout)
     }
 
     async fn start(&self, index: u32) -> AppResult<()> {
@@ -212,7 +285,7 @@ impl EmulatorClient for MumuClient {
 
 #[cfg(test)]
 mod tests {
-    use super::simulation_config;
+    use super::{mumu_stdout_error, simulation_config};
 
     #[test]
     fn maps_hardware_keys_to_mumu_simulation_keys() {
@@ -248,5 +321,23 @@ mod tests {
             Some(("enable_su".to_string(), "0".to_string()))
         );
         assert_eq!(simulation_config("android_id", "abc"), None);
+    }
+
+    #[test]
+    fn stdout_error_ignores_vm_names_in_info_json() {
+        let stdout = r#"{"1":{"name":"test-fail-Error99","is_android_started":true}}"#;
+        assert_eq!(mumu_stdout_error(stdout), None);
+    }
+
+    #[test]
+    fn stdout_error_catches_structured_negative_errcode() {
+        let stdout = r#"{"errcode":-103,"message":"running"}"#;
+        assert_eq!(mumu_stdout_error(stdout), Some(stdout.to_string()));
+    }
+
+    #[test]
+    fn stdout_error_catches_error_token_at_start_only() {
+        assert!(mumu_stdout_error("failed: delete vm").is_some());
+        assert_eq!(mumu_stdout_error("vm name contains failed later"), None);
     }
 }

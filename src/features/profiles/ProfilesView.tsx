@@ -46,7 +46,15 @@ export function ProfilesView() {
     toast.info(`Đang cấp VM & chạy "${username}"…`);
     void withBusy(username, () =>
       run(username)
-        .then((vm) => toast.success(`"${username}" đang chạy trên VM #${vm}`))
+        .then((result) => {
+          toast.success(`"${username}" đang chạy trên VM #${result.vmIndex}`);
+          if (result.health.fingerprintLock.attempted && !result.health.fingerprintLock.locked) {
+            toast.error(`Fingerprint chưa khóa: ${result.health.fingerprintLock.message}`);
+          }
+          if (result.health.fixableTells.length > 0) {
+            toast.error(`Tell sửa được còn lộ: ${result.health.fixableTells.join(', ')}`);
+          }
+        })
         .catch((e: unknown) => toast.error(`Chạy lỗi: ${e instanceof Error ? e.message : e}`)),
     );
   };
@@ -180,11 +188,19 @@ export function ProfilesView() {
                 onDelete={(v) => setPendingDelete(v)}
                 onUpdateNote={(username, note) => {
                   const p = profiles.find((x) => x.profile.username === username)?.profile;
-                  if (p) void update(username, p.account, note, p.country);
+                  if (p) {
+                    void update(username, p.account, note, p.country).catch((e: unknown) =>
+                      toast.error(`Lưu ghi chú lỗi: ${e instanceof Error ? e.message : e}`),
+                    );
+                  }
                 }}
                 onUpdateCountry={(username, country) => {
                   const p = profiles.find((x) => x.profile.username === username)?.profile;
-                  if (p) void update(username, p.account, p.note, country);
+                  if (p) {
+                    void update(username, p.account, p.note, country).catch((e: unknown) =>
+                      toast.error(`Lưu quốc gia lỗi: ${e instanceof Error ? e.message : e}`),
+                    );
+                  }
                 }}
               />
             ))}
@@ -196,11 +212,15 @@ export function ProfilesView() {
       <CreateInstanceDialog
         open={createOpen}
         onCancel={() => setCreateOpen(false)}
-        onSubmit={(account, note, country) => {
-          void create(account, note, country)
-            .then(() => toast.success(`Đã tạo profile "${account.tiktokUsername}"`))
-            .catch((e: unknown) => toast.error(`Tạo lỗi: ${e instanceof Error ? e.message : e}`));
-          setCreateOpen(false);
+        onSubmit={async (account, note, country) => {
+          try {
+            await create(account, note, country);
+            toast.success(`Đã tạo profile "${account.tiktokUsername}"`);
+            setCreateOpen(false);
+          } catch (e: unknown) {
+            toast.error(`Tạo lỗi: ${e instanceof Error ? e.message : e}`);
+            throw e;
+          }
         }}
       />
 
@@ -218,13 +238,17 @@ export function ProfilesView() {
             : null
         }
         onCancel={() => setEditProfile(null)}
-        onSubmit={(account: AccountProfile, note, country) => {
-          if (editProfile) {
-            void update(editProfile.profile.username, account, note, country)
-              .then(() => toast.success(`Đã lưu "${editProfile.profile.username}"`))
-              .catch((e: unknown) => toast.error(`Lưu lỗi: ${e instanceof Error ? e.message : e}`));
+        onSubmit={async (account: AccountProfile, note, country) => {
+          if (!editProfile) return;
+          const username = editProfile.profile.username;
+          try {
+            await update(username, account, note, country);
+            toast.success(`Đã lưu "${username}"`);
+            setEditProfile(null);
+          } catch (e: unknown) {
+            toast.error(`Lưu lỗi: ${e instanceof Error ? e.message : e}`);
+            throw e;
           }
-          setEditProfile(null);
         }}
       />
 
@@ -238,7 +262,7 @@ export function ProfilesView() {
       <ConfirmDialog
         open={pendingDelete !== null}
         title={`Xóa profile "${pendingDelete?.profile.username}"?`}
-        description="Xóa tài khoản khỏi danh sách. Nếu đang chạy sẽ backup + hủy VM trước. Snapshot session vẫn giữ."
+        description="Xóa tài khoản khỏi danh sách. Nếu đang chạy sẽ backup + hủy VM trước. Snapshot session của profile này cũng được dọn khỏi kho lưu trữ."
         confirmLabel="Xóa profile"
         danger
         onCancel={() => setPendingDelete(null)}

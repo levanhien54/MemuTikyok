@@ -6,10 +6,11 @@
 
 use crate::error::{AppError, AppResult};
 use crate::model::{
-    AccountProfile, Profile, ProfileView, SnapshotRecord, DEFAULT_TIKTOK_APK, TIKTOK_PKG,
+    AccountProfile, Profile, ProfileView, RunProfileResult, SnapshotRecord, DEFAULT_TIKTOK_APK,
+    TIKTOK_PKG,
 };
 use crate::orchestrator;
-use crate::state::{now_ms, RunSlot, SharedState, RESERVED_VM};
+use crate::state::{now_ms, RunSlot, SharedState, TeardownSlot, RESERVED_VM};
 
 /// Số VM chạy đồng thời tối đa (kế hoạch §18: tối đa ~5 VM).
 pub const MAX_RUNNING_VMS: usize = 5;
@@ -201,14 +202,22 @@ pub async fn update(
 /// CHẠY profile: cổng quốc gia → ĐẶT CHỖ nguyên tử (idempotency + ≤ MAX) → provision
 /// VM sạch (áp fingerprint + cài TikTok + restore session theo username) → mở TikTok →
 /// ghi running map + cập nhật last_run_at. Idempotent: đang chạy → trả VM hiện tại.
-pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
+pub async fn run(state: &SharedState, username: &str) -> AppResult<RunProfileResult> {
     let profile = state
         .get_profile(username)
         .await
         .ok_or_else(|| AppError::InvalidInput("Không tìm thấy profile".into()))?;
     // Đã chạy rồi → trả VM hiện tại ngay (không tra mạng, không cấp thêm).
+    if state.is_stopping(username).await {
+        return Err(AppError::InvalidInput(
+            "Profile đang backup và dừng VM — vui lòng đợi".into(),
+        ));
+    }
     if let Some(vm) = state.running_vm_of(username).await {
-        return Ok(vm);
+        return Ok(RunProfileResult {
+            vm_index: vm,
+            health: state.provision_health(vm).await,
+        });
     }
     // Cổng quốc gia (validation TRƯỚC khi chiếm slot): IP thoát thực tế phải khớp.
     // ⚠️ Đây là kiểm IP thoát của HOST (mọi VM chung NAT host) — phép kiểm VPN mức-host,
@@ -228,10 +237,20 @@ pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
     // NGUYÊN TỬ: idempotency + cổng tối đa + ĐẶT CHỖ slot dưới MỘT khóa (chống đua:
     // nhiều run song song không cùng vượt cổng; cùng username không provision đôi).
     match state.reserve_run_slot(username, MAX_RUNNING_VMS).await {
-        RunSlot::AlreadyRunning(vm) => return Ok(vm),
+        RunSlot::AlreadyRunning(vm) => {
+            return Ok(RunProfileResult {
+                vm_index: vm,
+                health: state.provision_health(vm).await,
+            })
+        }
         RunSlot::Pending => {
             return Err(AppError::InvalidInput(
                 "Profile đang được khởi chạy — vui lòng đợi".into(),
+            ))
+        }
+        RunSlot::Stopping => {
+            return Err(AppError::InvalidInput(
+                "Profile đang backup và dừng VM — vui lòng đợi".into(),
             ))
         }
         RunSlot::AtCapacity => {
@@ -266,7 +285,10 @@ pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
             state.upsert_profile(p).await; // ghi bản hiện tại + last_run_at (không clobber)
             state.set_running_profile(username, idx).await; // RESERVED → idx thật
             reservation.commit(); // giữ entry idx — Drop không nhả
-            Ok(idx)
+            Ok(RunProfileResult {
+                vm_index: idx,
+                health: state.provision_health(idx).await,
+            })
         }
         None => {
             // Profile bị XÓA giữa chừng → HỦY VM vừa cấp (khỏi backup — profile đã mất).
@@ -284,22 +306,29 @@ pub async fn run(state: &SharedState, username: &str) -> AppResult<u32> {
 /// DỪNG profile: backup session → HỦY VM (disposable) → nhả running map. Trả
 /// snapshot record nếu đang chạy; `None` nếu profile không chạy (idempotent).
 pub async fn stop(state: &SharedState, username: &str) -> AppResult<Option<SnapshotRecord>> {
-    // Đang provision (RESERVED) → từ chối: chưa có VM thật để dừng.
-    if state.is_reserved(username).await {
-        return Err(AppError::InvalidInput(
-            "Profile đang khởi chạy — vui lòng đợi rồi thử lại".into(),
-        ));
-    }
-    // Lấy-và-xóa NGUYÊN TỬ (chỉ một caller thắng entry → chống teardown đôi).
-    let Some(idx) = state.take_running_vm(username).await else {
-        return Ok(None);
+    let idx = match state.begin_teardown_profile(username).await {
+        TeardownSlot::Ready(idx) => idx,
+        TeardownSlot::NotRunning => return Ok(None),
+        TeardownSlot::Pending => {
+            return Err(AppError::InvalidInput(
+                "Profile đang khởi chạy — vui lòng đợi rồi thử lại".into(),
+            ))
+        }
+        TeardownSlot::AlreadyStopping => {
+            return Err(AppError::InvalidInput(
+                "Profile đang backup và dừng VM — vui lòng đợi".into(),
+            ))
+        }
     };
     match orchestrator::teardown(state, idx, username).await {
-        Ok(rec) => Ok(Some(rec)),
+        Ok(rec) => {
+            state.finish_teardown_profile(username).await;
+            Ok(Some(rec))
+        }
         // Teardown lỗi (vd backup fail) → TÁI theo dõi để retry, KHÔNG bỏ VM khỏi map
         // (nếu bỏ, VM còn chạy nhưng vô chủ). Muốn bỏ hẳn dù backup lỗi → dùng Xóa.
         Err(e) => {
-            state.set_running_profile(username, idx).await;
+            state.abort_teardown_profile(username).await;
             Err(e)
         }
     }
@@ -308,19 +337,46 @@ pub async fn stop(state: &SharedState, username: &str) -> AppResult<Option<Snaps
 /// XÓA profile: người dùng CHỦ ĐÍCH bỏ → cố backup nhưng KHÔNG chặn xóa nếu backup lỗi
 /// (force hủy VM). Đây là lối thoát khi một phiên có dữ liệu không backup được.
 pub async fn delete(state: &SharedState, username: &str) -> AppResult<()> {
-    // Đang provision (RESERVED) → từ chối: đợi run xong đã (tránh xóa lúc đang cấp VM).
-    if state.is_reserved(username).await {
-        return Err(AppError::InvalidInput(
-            "Profile đang khởi chạy — vui lòng đợi rồi xóa".into(),
-        ));
+    match state.begin_teardown_profile(username).await {
+        TeardownSlot::Ready(idx) => {
+            if let Err(e) = orchestrator::teardown(state, idx, username).await {
+                // Backup khi xóa lỗi → VẪN hủy VM + xóa profile (force), không để kẹt.
+                tracing::warn!(username, error = %e, "backup khi xóa lỗi — force hủy VM + xóa");
+                let _ = state.emulator.stop(idx).await;
+                let _ = state.emulator.remove(idx).await;
+                state.forget(idx).await;
+            }
+            state.finish_teardown_profile(username).await;
+        }
+        TeardownSlot::NotRunning => {}
+        TeardownSlot::Pending => {
+            return Err(AppError::InvalidInput(
+                "Profile đang khởi chạy — vui lòng đợi rồi xóa".into(),
+            ))
+        }
+        TeardownSlot::AlreadyStopping => {
+            return Err(AppError::InvalidInput(
+                "Profile đang backup và dừng VM — vui lòng đợi".into(),
+            ))
+        }
     }
-    if let Some(idx) = state.take_running_vm(username).await {
-        if let Err(e) = orchestrator::teardown(state, idx, username).await {
-            // Backup khi xóa lỗi → VẪN hủy VM + xóa profile (force), không để kẹt.
-            tracing::warn!(username, error = %e, "backup khi xóa lỗi — force hủy VM + xóa");
-            let _ = state.emulator.stop(idx).await;
-            let _ = state.emulator.remove(idx).await;
-            state.forget(idx).await;
+    if let Some(db) = &state.db {
+        match db.snapshot_keys(username) {
+            Ok(keys) => {
+                for key in keys {
+                    match state.store.delete(&key).await {
+                        Ok(()) => {
+                            let _ = db.delete_snapshot_key(&key);
+                        }
+                        Err(e) => {
+                            tracing::warn!(username, key = %key, error = %e, "không xóa được blob snapshot khi xóa profile")
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(username, error = %e, "không liệt kê được snapshot khi xóa profile")
+            }
         }
     }
     state.delete_profile(username).await;
@@ -359,12 +415,25 @@ pub async fn reconcile_startup(state: &SharedState) -> usize {
                 "Reconcile: hủy VM mồ côi từ phiên trước (crash/tắt đột ngột)"
             );
             let _ = state.emulator.stop(idx).await;
-            let _ = state.emulator.remove(idx).await;
-            state.forget(idx).await;
-            cleaned += 1;
+            match state.emulator.remove(idx).await {
+                Ok(()) => {
+                    state.forget(idx).await;
+                    let _ = db.remove_running(&username);
+                    cleaned += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        username = %username,
+                        idx,
+                        error = %e,
+                        "Reconcile: remove VM mồ côi thất bại — giữ row để retry lần sau"
+                    );
+                }
+            }
+        } else {
+            let _ = db.remove_running(&username);
         }
     }
-    let _ = db.clear_running();
     cleaned
 }
 
@@ -446,7 +515,7 @@ mod tests {
         let state = make_state("idem", Arc::new(MockGeolocator));
         create(&state, acc("acc_r"), None, None).await.unwrap();
         state.set_running_profile("acc_r", 42).await;
-        assert_eq!(run(&state, "acc_r").await.unwrap(), 42);
+        assert_eq!(run(&state, "acc_r").await.unwrap().vm_index, 42);
     }
 
     #[tokio::test]

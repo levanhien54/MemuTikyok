@@ -7,7 +7,9 @@ use std::collections::HashSet;
 use std::fs;
 
 use crate::error::{AppError, AppResult};
-use crate::model::{HardwareProfile, SnapshotMeta, SnapshotRecord, DEFAULT_BLOAT, TIKTOK_PKG};
+use crate::model::{
+    FingerprintLockStatus, HardwareProfile, SnapshotMeta, SnapshotRecord, DEFAULT_BLOAT, TIKTOK_PKG,
+};
 use crate::state::{now_ms, SharedState};
 
 /// Tập index VM hiện có (từ emulator).
@@ -25,12 +27,21 @@ async fn index_set(state: &SharedState) -> AppResult<HashSet<u32>> {
 /// Đáng tin hơn `max(index)` vì emulator có thể **tái dùng** index đã xóa (lấp khoảng
 /// trống), khiến max() trỏ nhầm sang VM khác.
 async fn identify_new(state: &SharedState, before: &HashSet<u32>) -> AppResult<u32> {
-    index_set(state)
+    let mut created: Vec<u32> = index_set(state)
         .await?
         .difference(before)
         .copied()
-        .max()
-        .ok_or_else(|| AppError::CommandFailed("Không xác định được VM vừa tạo".into()))
+        .collect();
+    created.sort_unstable();
+    match created.as_slice() {
+        [idx] => Ok(*idx),
+        [] => Err(AppError::CommandFailed(
+            "Không xác định được VM vừa tạo".into(),
+        )),
+        many => Err(AppError::CommandFailed(format!(
+            "Có nhiều VM mới xuất hiện sau create ({many:?}); không đoán index để tránh đụng nhầm VM"
+        ))),
+    }
 }
 
 /// Tạo một VM mới và trả về index của nó (an toàn với tái dùng index + đua tranh).
@@ -49,6 +60,35 @@ async fn auto_debloat(state: &SharedState, index: u32) {
     }
     // Ẩn dấu vết emulator sửa được (native-bridge/hypervisor là giới hạn x86 — xem docs).
     let _ = state.adb.harden(index).await;
+}
+
+fn is_fixable_tell(check: &str) -> bool {
+    !check.contains("Native Bridge")
+        && !check.contains("hypervisor")
+        && !check.contains("Motion sensors")
+        && !check.contains("Sensor provider")
+        // "Magisk/resetprop" đã được phản ánh qua fingerprint_lock → loại khỏi fixable_tells
+        // để tránh 2 toast cùng nguyên nhân khi chưa cấu hình Magisk.
+        && !check.contains("Magisk/resetprop")
+}
+
+async fn record_final_health_scan(state: &SharedState, index: u32) {
+    match state.adb.scan_emulator_tells(index).await {
+        Ok(tells) => {
+            let fixable = tells
+                .into_iter()
+                .filter(|tell| tell.detected && is_fixable_tell(&tell.check))
+                .map(|tell| tell.check)
+                .collect();
+            state.set_fixable_tells(index, fixable).await;
+        }
+        Err(e) => {
+            tracing::warn!(index, error = %e, "Khong scan duoc final provision health");
+            state
+                .set_fixable_tells(index, vec!["scan_emulator_tells_failed".into()])
+                .await;
+        }
+    }
 }
 
 /// Áp toàn bộ cấu hình phần cứng (fingerprint) vào VM: các khoá MuMu `simulation` +
@@ -105,13 +145,27 @@ async fn reassert_runtime_fingerprint(
         );
     }
 
-    if let Err(e) = state.adb.lock_device_identity(index, hw).await {
-        tracing::warn!(
-            index,
-            error = %e,
-            "Khong re-apply duoc ro.product/build fingerprint"
-        );
-    }
+    let fingerprint_lock = match state.adb.lock_device_identity(index, hw).await {
+        Ok(true) => FingerprintLockStatus::locked(),
+        Ok(false) => {
+            tracing::warn!(
+                index,
+                "Chua khoa duoc ro.product/build fingerprint bang resetprop"
+            );
+            FingerprintLockStatus::missing_magisk()
+        }
+        Err(e) => {
+            tracing::warn!(
+                index,
+                error = %e,
+                "Khong re-apply duoc ro.product/build fingerprint"
+            );
+            FingerprintLockStatus::failed(e)
+        }
+    };
+    state
+        .set_fingerprint_lock_status(index, fingerprint_lock)
+        .await;
 
     Ok(())
 }
@@ -144,11 +198,21 @@ pub async fn backup_and_record(
             size_bytes: stored.size_bytes,
             apk_version: adb_meta.apk_version.clone(),
         };
-        db.record_snapshot(account_key, &storage_key, &meta, created)?;
-        for old_key in db.snapshots_beyond(account_key, SNAPSHOT_RETENTION)? {
-            let _ = state.store.delete(&old_key).await;
+        if let Err(e) = db.record_snapshot(account_key, &storage_key, &meta, created) {
+            let _ = state.store.delete(&storage_key).await;
+            return Err(e.into());
         }
-        db.prune_snapshots(account_key, SNAPSHOT_RETENTION)?;
+        for old_key in db.snapshots_beyond(account_key, SNAPSHOT_RETENTION)? {
+            match state.store.delete(&old_key).await {
+                Ok(()) => db.delete_snapshot_key(&old_key)?,
+                Err(e) => tracing::warn!(
+                    account_key,
+                    old_key = %old_key,
+                    error = %e,
+                    "Không xóa được blob snapshot cũ; giữ row để retry"
+                ),
+            }
+        }
     }
 
     Ok(SnapshotRecord {
@@ -176,6 +240,7 @@ pub async fn provision(
 ) -> AppResult<u32> {
     // 1) Tạo VM mới tinh và xác định index của nó (an toàn tái dùng index/đua tranh).
     let index = create_vm(state).await?;
+    state.record_running_marker(account_key, index);
 
     // 2..4) Chuẩn bị VM. NGUYÊN TỬ: nếu BẤT KỲ bước nào lỗi → HỦY VM vừa tạo. VM đã
     // được tạo nhưng CHƯA trả về caller nên không ai teardown được nó — nếu không dọn
@@ -187,6 +252,7 @@ pub async fn provision(
             let _ = state.emulator.stop(index).await;
             let _ = state.emulator.remove(index).await;
             state.forget(index).await;
+            state.clear_running_marker(account_key);
             Err(e)
         }
     }
@@ -270,6 +336,8 @@ async fn provision_prepare(
         reassert_runtime_fingerprint(state, index, hw, false).await?;
     }
 
+    record_final_health_scan(state, index).await;
+
     Ok(())
 }
 
@@ -293,6 +361,7 @@ pub async fn teardown(
         state.emulator.remove(index).await?;
     }
     state.forget(index).await;
+    state.clear_running_marker(account_key);
 
     Ok(record)
 }
@@ -322,6 +391,11 @@ mod tests {
             device: "frd".into(),
             build_fingerprint: "HUAWEI/FRD-L19/HWFRD:8.0.0/HUAWEIFRD-L19/380C431:user/release-keys"
                 .into(),
+            soc_hardware: "kirin950".into(),
+            board_platform: "hi3650".into(),
+            gpu_egl: "mali".into(),
+            security_patch: "2018-01-01".into(),
+            build_characteristics: "".into(),
         }
     }
 

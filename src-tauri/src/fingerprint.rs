@@ -24,6 +24,12 @@ struct DeviceProfile {
     w: u32,
     h: u32,
     dpi: u32,
+    tac: &'static str,
+    soc_hardware: &'static str,
+    board_platform: &'static str,
+    gpu_egl: &'static str,
+    security_patch: &'static str,
+    build_characteristics: &'static str,
 }
 
 const DEVICES: &[DeviceProfile] = &[
@@ -38,6 +44,12 @@ const DEVICES: &[DeviceProfile] = &[
         w: 1080,
         h: 1920,
         dpi: 480,
+        tac: "",
+        soc_hardware: "",
+        board_platform: "",
+        gpu_egl: "mali",
+        security_patch: "2018-11-01",
+        build_characteristics: "",
     },
     // Samsung Galaxy S9 (SM-G960F, starlte).
     DeviceProfile {
@@ -49,6 +61,12 @@ const DEVICES: &[DeviceProfile] = &[
         w: 1080,
         h: 2220,
         dpi: 480,
+        tac: "",
+        soc_hardware: "",
+        board_platform: "",
+        gpu_egl: "mali",
+        security_patch: "2021-10-01",
+        build_characteristics: "",
     },
     // Samsung Galaxy S8 (SM-G950F, dreamlte).
     DeviceProfile {
@@ -61,6 +79,12 @@ const DEVICES: &[DeviceProfile] = &[
         w: 1080,
         h: 2220,
         dpi: 480,
+        tac: "",
+        soc_hardware: "",
+        board_platform: "",
+        gpu_egl: "mali",
+        security_patch: "2021-05-01",
+        build_characteristics: "",
     },
     // Samsung Galaxy A50 (SM-A505F, a50).
     DeviceProfile {
@@ -72,6 +96,12 @@ const DEVICES: &[DeviceProfile] = &[
         w: 1080,
         h: 2340,
         dpi: 420,
+        tac: "",
+        soc_hardware: "",
+        board_platform: "",
+        gpu_egl: "mali",
+        security_patch: "2021-03-01",
+        build_characteristics: "",
     },
     // Xiaomi Redmi Note 8 (ginkgo).
     DeviceProfile {
@@ -83,6 +113,12 @@ const DEVICES: &[DeviceProfile] = &[
         w: 1080,
         h: 2340,
         dpi: 440,
+        tac: "",
+        soc_hardware: "qcom",
+        board_platform: "",
+        gpu_egl: "adreno",
+        security_patch: "2021-05-01",
+        build_characteristics: "",
     },
 ];
 
@@ -110,12 +146,34 @@ fn luhn_check_digit(payload: &[u8]) -> u8 {
     ((10 - (sum % 10)) % 10) as u8
 }
 
-fn gen_imei() -> AppResult<String> {
-    let digits: Vec<u8> = rand_bytes(14)?.iter().map(|b| b % 10).collect();
+fn gen_imei(tac: &str) -> AppResult<String> {
+    let tac_digits: Vec<u8> = tac
+        .chars()
+        .filter_map(|c| c.to_digit(10))
+        .map(|d| d as u8)
+        .collect();
+    let mut digits: Vec<u8> = Vec::with_capacity(14);
+    if tac_digits.len() == 8 {
+        digits.extend_from_slice(&tac_digits);
+        digits.extend(rand_bytes(6)?.iter().map(|b| b % 10));
+    } else {
+        digits.extend(rand_bytes(14)?.iter().map(|b| b % 10));
+    }
     let check = luhn_check_digit(&digits);
     let mut s: String = digits.iter().map(|d| (b'0' + d) as char).collect();
     s.push((b'0' + check) as char);
     Ok(s)
+}
+
+fn pick_device_index(n: usize) -> AppResult<usize> {
+    assert!(n > 0 && n <= 256);
+    let limit = (256 / n) * n;
+    loop {
+        let b = rand_bytes(1)?[0] as usize;
+        if b < limit {
+            return Ok(b % n);
+        }
+    }
 }
 
 fn gen_android_id() -> AppResult<String> {
@@ -134,13 +192,13 @@ fn gen_mac() -> AppResult<String> {
 
 /// Sinh một hồ sơ phần cứng ngẫu nhiên hợp lệ (bộ device NHẤT QUÁN + fingerprint thật).
 pub fn generate() -> AppResult<HardwareProfile> {
-    let pick = rand_bytes(1)?[0] as usize % DEVICES.len();
+    let pick = pick_device_index(DEVICES.len())?;
     let d = &DEVICES[pick];
     Ok(HardwareProfile {
         model: d.model.to_string(),
         brand: d.brand.to_string(),
         manufacturer: d.manufacturer.to_string(),
-        imei: gen_imei()?,
+        imei: gen_imei(d.tac)?,
         android_id: gen_android_id()?,
         mac: gen_mac()?,
         res_width: d.w,
@@ -148,6 +206,11 @@ pub fn generate() -> AppResult<HardwareProfile> {
         dpi: d.dpi,
         device: d.device.to_string(),
         build_fingerprint: d.fingerprint.to_string(),
+        soc_hardware: d.soc_hardware.to_string(),
+        board_platform: d.board_platform.to_string(),
+        gpu_egl: d.gpu_egl.to_string(),
+        security_patch: d.security_patch.to_string(),
+        build_characteristics: d.build_characteristics.to_string(),
     })
 }
 
@@ -181,6 +244,35 @@ mod tests {
             assert!(hw.imei.chars().all(|c| c.is_ascii_digit()));
             assert!(luhn_valid(&hw.imei), "IMEI {} phải hợp lệ Luhn", hw.imei);
         }
+    }
+
+    #[test]
+    fn imei_dung_tac_khi_co() {
+        let imei = gen_imei("35847209").unwrap();
+        assert_eq!(imei.len(), 15);
+        assert_eq!(&imei[..8], "35847209", "8 so dau phai la TAC");
+        assert!(luhn_valid(&imei));
+    }
+
+    #[test]
+    fn imei_random_khi_tac_rong() {
+        let imei = gen_imei("").unwrap();
+        assert_eq!(imei.len(), 15);
+        assert!(luhn_valid(&imei));
+    }
+
+    #[test]
+    fn chon_device_khong_lech_modulo() {
+        let mut seen = vec![false; DEVICES.len()];
+        for _ in 0..500 {
+            let i = pick_device_index(DEVICES.len()).unwrap();
+            assert!(i < DEVICES.len());
+            seen[i] = true;
+        }
+        assert!(
+            seen.iter().all(|&b| b),
+            "moi device deu phai duoc chon it nhat 1 lan"
+        );
     }
 
     #[test]

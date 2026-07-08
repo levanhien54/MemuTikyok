@@ -57,6 +57,7 @@ function ProfileRowImpl({
   const running = view.runningVm != null;
   const username = profile.account.tiktokUsername || profile.username;
   const email = profile.account.email;
+  const locked = busy || Boolean(isUploading);
 
   const menuItems: MenuItem[] = [
     { label: 'Chỉnh sửa thông tin', icon: <Pencil size={15} />, onClick: () => onEdit(view) },
@@ -69,19 +70,20 @@ function ProfileRowImpl({
       label: 'Kiểm tra dấu vết ảo',
       icon: <ShieldCheck size={15} />,
       onClick: () => onScanEmulator(view),
-      disabled: !running,
+      disabled: !running || locked,
     },
     {
       label: 'Chạy phiên xem (giả người)',
       icon: <Bot size={15} />,
       onClick: () => onRunSession(view),
-      disabled: !running,
+      disabled: !running || locked,
     },
     {
       label: 'Xóa profile',
       icon: <Trash2 size={15} />,
       onClick: () => onDelete(view),
       danger: true,
+      disabled: locked,
     },
   ];
 
@@ -128,7 +130,7 @@ function ProfileRowImpl({
             <Button
               size="icon"
               variant="ghost"
-              disabled={busy || isUploading}
+              disabled={locked}
               onClick={() => onUploadVideo(view)}
               aria-label="Nạp Video"
               title="Đưa video vào bộ sưu tập máy ảo"
@@ -139,7 +141,7 @@ function ProfileRowImpl({
             <Button
               size="icon"
               variant="ghost"
-              disabled={busy}
+              disabled={locked}
               onClick={() => onStop(profile.username)}
               aria-label="Dừng"
               title="Dừng + backup phiên (hủy VM)"
@@ -152,7 +154,7 @@ function ProfileRowImpl({
           <Button
             size="icon"
             variant="primary"
-            disabled={busy}
+            disabled={locked}
             onClick={() => onRun(profile.username)}
             aria-label="Chạy"
             title="Cấp VM + nạp session & chạy"

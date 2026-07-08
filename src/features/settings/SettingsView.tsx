@@ -74,7 +74,11 @@ export function SettingsView() {
             max={10000}
             step={500}
             value={settings.pollIntervalMs}
-            onChange={(e) => void save({ pollIntervalMs: Number(e.target.value) })}
+            onChange={(e) => {
+              if (Number.isFinite(e.target.valueAsNumber)) {
+                void save({ pollIntervalMs: e.target.valueAsNumber });
+              }
+            }}
             className="h-9 w-32 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
           />
         </Field>
@@ -85,7 +89,11 @@ export function SettingsView() {
             min={1}
             max={10}
             value={settings.maxConcurrency}
-            onChange={(e) => void save({ maxConcurrency: Number(e.target.value) })}
+            onChange={(e) => {
+              if (Number.isFinite(e.target.valueAsNumber)) {
+                void save({ maxConcurrency: e.target.valueAsNumber });
+              }
+            }}
             className="h-9 w-32 rounded-md border border-border bg-surface-2 px-3 text-sm outline-none focus:border-primary"
           />
         </Field>

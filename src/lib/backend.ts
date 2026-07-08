@@ -5,6 +5,7 @@ import type {
   EmulatorTell,
   SessionReport,
   ProfileView,
+  RunProfileResult,
 } from '@/types/instance';
 
 /**
@@ -29,7 +30,7 @@ export interface Backend {
     country: string | null,
   ): Promise<void>;
   /** Chạy profile: cấp VM sạch + cài TikTok + restore session + mở app. Trả vm_index. */
-  runProfile(username: string): Promise<number>;
+  runProfile(username: string): Promise<RunProfileResult>;
   /** Dừng profile: backup session → hủy VM. Trả snapshot nếu có. */
   stopProfile(username: string): Promise<SnapshotRecord | null>;
   deleteProfile(username: string): Promise<void>;

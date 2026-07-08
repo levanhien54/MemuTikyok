@@ -32,11 +32,38 @@ use emulator::{EmulatorClient, MockClient, MumuClient};
 use geo::{HttpGeolocator, IpGeolocator};
 use model::AppSettings;
 use snapshot::{LocalSnapshotStore, SnapshotStore};
-use state::{AppState, InstanceMeta};
+use state::{AppState, InstanceMeta, ReloadableAdbWorker, ReloadableEmulatorClient};
+
+struct DisabledSnapshotStore {
+    reason: String,
+}
+
+#[async_trait::async_trait]
+impl SnapshotStore for DisabledSnapshotStore {
+    async fn put(
+        &self,
+        _key: &str,
+        _file: &std::path::Path,
+    ) -> error::AppResult<snapshot::StoredMeta> {
+        Err(error::AppError::Io(self.reason.clone()))
+    }
+
+    async fn get(&self, _key: &str, _dst: &std::path::Path) -> error::AppResult<()> {
+        Err(error::AppError::Io(self.reason.clone()))
+    }
+
+    async fn verify(&self, _key: &str, _sha256: &str) -> error::AppResult<bool> {
+        Ok(false)
+    }
+
+    async fn delete(&self, _key: &str) -> error::AppResult<()> {
+        Ok(())
+    }
+}
 
 /// Chọn adapter: dùng MuMu thật nếu tìm thấy `MuMuManager.exe`, ngược lại fallback mock
 /// (để UI vẫn chạy được khi máy chưa cài MuMu — R-03).
-fn build_emulator(settings: &AppSettings) -> Arc<dyn EmulatorClient> {
+pub(crate) fn build_emulator(settings: &AppSettings) -> Arc<dyn EmulatorClient> {
     #[cfg(feature = "mock-emulator")]
     {
         let _ = settings;
@@ -123,7 +150,7 @@ pub(crate) fn persist_settings(settings: &AppSettings) {
 }
 
 /// Chọn ADB Worker: dùng MuMuManager thật nếu có, ngược lại Mock (dev/test).
-fn build_adb(settings: &AppSettings) -> Arc<dyn AdbWorker> {
+pub(crate) fn build_adb(settings: &AppSettings) -> Arc<dyn AdbWorker> {
     match resolve_emulator(&settings.mumu_path) {
         Some(p) => Arc::new(RealAdbWorker::new(p)),
         None => {
@@ -162,10 +189,15 @@ fn build_store() -> Arc<dyn SnapshotStore> {
         }
         Err(e) => {
             tracing::warn!(error = %e, "Không mở được kho snapshot — dùng thư mục temp");
-            Arc::new(
-                LocalSnapshotStore::new(std::env::temp_dir().join("mpm-snapshots"), key)
-                    .expect("không tạo được kho snapshot tạm"),
-            )
+            match LocalSnapshotStore::new(std::env::temp_dir().join("mpm-snapshots"), key) {
+                Ok(s) => Arc::new(s),
+                Err(e2) => {
+                    tracing::error!(error = %e2, "Không tạo được kho snapshot tạm — backup sẽ bị vô hiệu hóa");
+                    Arc::new(DisabledSnapshotStore {
+                        reason: format!("Không mở được kho snapshot: {e2}"),
+                    })
+                }
+            }
         }
     }
 }
@@ -200,15 +232,39 @@ pub(crate) fn init_magisk_bin(settings: &AppSettings) -> Option<PathBuf> {
 fn init_db(key: Option<crypto::Key32>) -> (Option<Db>, HashMap<u32, InstanceMeta>) {
     match db_path() {
         Some(p) => {
-            let db = Db::open_with_key(&p, key).expect("không mở được DB");
-            let meta = db.load_all().unwrap_or_default();
+            let db = match Db::open_with_key(&p, key) {
+                Ok(db) => db,
+                Err(e) => {
+                    tracing::error!(path = %p.display(), error = %e, "Không mở được DB persistent — dùng in-memory");
+                    return open_memory_db();
+                }
+            };
+            let meta = match db.load_all() {
+                Ok(meta) => meta,
+                Err(e) => {
+                    tracing::error!(path = %p.display(), error = %e, "Không load được metadata DB — tắt DB persistent để tránh ghi đè dữ liệu cũ");
+                    return (None, HashMap::new());
+                }
+            };
+            if let Err(e) = db.load_profiles() {
+                tracing::error!(path = %p.display(), error = %e, "Không giải mã/load được profile DB — tắt DB persistent để tránh ghi đè credential");
+                return (None, HashMap::new());
+            }
             (Some(db), meta)
         }
         None => {
             tracing::warn!("Không có data_dir, dùng DB trong RAM");
-            let db = Db::open_with_key(std::path::Path::new(":memory:"), None)
-                .expect("không mở được in-memory DB");
-            (Some(db), HashMap::new())
+            open_memory_db()
+        }
+    }
+}
+
+fn open_memory_db() -> (Option<Db>, HashMap<u32, InstanceMeta>) {
+    match Db::open_with_key(std::path::Path::new(":memory:"), None) {
+        Ok(db) => (Some(db), HashMap::new()),
+        Err(e) => {
+            tracing::error!(error = %e, "Không mở được in-memory DB — chạy không persistence");
+            (None, HashMap::new())
         }
     }
 }
@@ -220,10 +276,14 @@ pub fn run() {
     let log_buffer = logcap::init();
 
     let settings = load_settings();
-    let emulator = build_emulator(&settings);
+    let emulator_inner = build_emulator(&settings);
+    let emulator_reload = Arc::new(ReloadableEmulatorClient::new(emulator_inner));
+    let emulator: Arc<dyn EmulatorClient> = emulator_reload.clone();
     // Tra IP→quốc gia thật qua ip-api.com (free, HTTP). Cache theo IP.
     let geo: Arc<dyn IpGeolocator> = Arc::new(HttpGeolocator::new());
-    let adb = build_adb(&settings);
+    let adb_inner = build_adb(&settings);
+    let adb_reload = Arc::new(ReloadableAdbWorker::new(adb_inner));
+    let adb: Arc<dyn AdbWorker> = adb_reload.clone();
 
     // Khoá mã hoá cho DB và snapshot
     let enc_key = load_enc_key();
@@ -232,8 +292,16 @@ pub fn run() {
     let (db, metadata) = init_db(enc_key);
     // Trích binary magisk TRƯỚC khi move `settings` vào AppState.
     let magisk_bin = init_magisk_bin(&settings);
-    let app_state: state::SharedState = Arc::new(AppState::new(
-        emulator, geo, adb, store, settings, db, metadata,
+    let app_state: state::SharedState = Arc::new(AppState::new_reloadable(
+        emulator,
+        emulator_reload,
+        geo,
+        adb,
+        adb_reload,
+        store,
+        settings,
+        db,
+        metadata,
     ));
     app_state.set_magisk_bin(magisk_bin);
     let reconcile_state = app_state.clone();
@@ -242,6 +310,7 @@ pub fn run() {
     // (bắc cầu `log`→tracing qua try_init) + LogsView đọc ring buffer. Nếu thêm plugin-log,
     // nó cố set logger LẦN 2 → PluginInitialization panic → app tắt câm khi khởi động.
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
         .manage(log_buffer)
         .setup(move |_app| {

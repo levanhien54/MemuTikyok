@@ -39,6 +39,7 @@ Run profile
   -> kiểm tra country gate nếu có
   -> reserve slot chạy
   -> EmulatorClient.create
+  -> persist `running_vms` marker ngay khi xác định được vm_index
   -> apply hardware qua MuMu simulation
   -> EmulatorClient.start
   -> AdbWorker.wait_boot_completed
@@ -52,6 +53,7 @@ Run profile
   -> ghi running profile và last_run_at
 
 Stop profile
+  -> mark profile đang teardown (vẫn chiếm slot)
   -> AdbWorker.backup
   -> SnapshotStore.put
   -> Db.record_snapshot trong transaction
@@ -146,7 +148,8 @@ Không còn poller nền phát event instance. UI tự gọi `list_profiles` khi
 luồng app.
 
 Khi app khởi động, `reconcile_startup` đọc bảng `running_vms`; VM nào còn sống từ phiên crash
-trước sẽ bị stop/remove và bảng running được dọn.
+trước sẽ bị stop/remove. Row chỉ được xóa sau khi remove thành công; nếu remove lỗi, row được giữ
+để lần khởi động sau retry thay vì mất dấu VM mồ côi.
 
 ## Chiến lược test
 

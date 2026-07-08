@@ -7,7 +7,9 @@
 use tauri::{AppHandle, Emitter, State};
 
 use crate::error::AppResult;
-use crate::model::{AccountProfile, AppSettings, EmulatorTell, ProfileView, SnapshotRecord};
+use crate::model::{
+    AccountProfile, AppSettings, EmulatorTell, ProfileView, RunProfileResult, SnapshotRecord,
+};
 use crate::state::SharedState;
 
 // ── Vòng đời PROFILE — lệnh dưới đây chỉ là adapter mỏng của `crate::profile_ops` ──
@@ -44,7 +46,10 @@ pub async fn update_profile(
 /// CHẠY profile: cấp VM sạch, áp fingerprint + cài TikTok + restore session theo
 /// username, mở TikTok. Giữ vm_index ↔ username. Chặn khi vượt tối đa 5 VM.
 #[tauri::command]
-pub async fn run_profile(username: String, state: State<'_, SharedState>) -> AppResult<u32> {
+pub async fn run_profile(
+    username: String,
+    state: State<'_, SharedState>,
+) -> AppResult<RunProfileResult> {
     crate::profile_ops::run(state.inner(), &username).await
 }
 
@@ -121,12 +126,13 @@ pub async fn get_settings(state: State<'_, SharedState>) -> AppResult<AppSetting
 /// Log ứng dụng gần nhất (ring buffer) để LogsView hiển thị — chẩn đoán khi Chạy lỗi.
 #[tauri::command]
 pub async fn get_logs(logs: State<'_, crate::logcap::LogBuffer>) -> AppResult<Vec<String>> {
-    Ok(logs.lock().unwrap().iter().cloned().collect())
+    let guard = logs.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(guard.iter().cloned().collect())
 }
 
 fn normalize_settings(settings: &mut AppSettings) {
-    settings.poll_interval_ms = settings.poll_interval_ms.max(250);
-    settings.max_concurrency = settings.max_concurrency.max(1);
+    settings.poll_interval_ms = settings.poll_interval_ms.clamp(1000, 10_000);
+    settings.max_concurrency = settings.max_concurrency.clamp(1, 10);
 }
 
 #[tauri::command]
@@ -136,6 +142,19 @@ pub async fn save_settings(
 ) -> AppResult<AppSettings> {
     // Ràng buộc giá trị an toàn: poll ≥ 250ms (interval(0) panic), concurrency ≥ 1.
     normalize_settings(&mut settings);
+    let old_mumu_path = state.settings.lock().await.mumu_path.clone();
+    let old_mumu_path = old_mumu_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let new_mumu_path = settings
+        .mumu_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let mumu_path_changed = old_mumu_path != new_mumu_path;
     {
         let mut guard = state.settings.lock().await;
         *guard = settings.clone();
@@ -147,6 +166,15 @@ pub async fn save_settings(
     // trong Cài đặt sẽ KHÔNG khóa được model cho tới khi khởi động lại app. Trỏ rỗng → None
     // (tắt khóa model). Cache theo mtime nên gọi lại mỗi lần lưu là rẻ khi APK không đổi.
     state.set_magisk_bin(crate::init_magisk_bin(&settings));
+    if mumu_path_changed {
+        let emulator = crate::build_emulator(&settings);
+        let adb = crate::build_adb(&settings);
+        if state.reload_clients(emulator, adb) {
+            tracing::info!("Da hot-reload MuMu/ADB adapter sau khi doi mumu_path");
+        } else {
+            tracing::warn!("State hien tai khong co reloadable adapter; doi mumu_path can restart");
+        }
+    }
     Ok(settings)
 }
 
@@ -164,7 +192,7 @@ mod tests {
 
         normalize_settings(&mut settings);
 
-        assert_eq!(settings.poll_interval_ms, 250);
+        assert_eq!(settings.poll_interval_ms, 1000);
         assert_eq!(settings.max_concurrency, 1);
     }
 

@@ -8,11 +8,13 @@
 > (kể cả Redroid-x86) gỡ được → **KHÔNG THỂ** đạt "máy ảo không thể phát hiện". MPM chỉ
 > giảm bề mặt lộ ở các trường **SỬA ĐƯỢC**: độ phân giải/DPI, MAC, ẩn root.
 >
-> ✅ **`ro.product.model`** (MuMu random khi boot) nay **KHÓA ĐƯỢC** qua **Magisk resetprop
+> ✅ **`ro.product.model`** (MuMu random khi boot) và **`ro.build.characteristics=tablet`**
+> nay **KHÓA ĐƯỢC RUNTIME** qua **Magisk resetprop
 > standalone**: MPM trích `libmagisk.so` từ **Magisk APK** (bạn trỏ trong Cài đặt), đẩy vào
 > mỗi VM (đã có root native), chạy `magisk resetprop` — **không cần base image / cài Magisk
-> hệ thống**. `lock_device_identity` sinh script + VERIFY (đọc lại model), đã kiểm chứng thực
-> khóa được cả model **có khoảng trắng** ("Redmi Note 8"). Xem
+> hệ thống**. `lock_device_identity` sinh script + VERIFY (đọc lại model, build fingerprint,
+> và `ro.build.characteristics` không còn là `tablet`), đã kiểm chứng thực khóa được cả model **có khoảng trắng**
+> ("Redmi Note 8"). Xem
 > [`BASE_IMAGE_MAGISK_SETUP.md`](BASE_IMAGE_MAGISK_SETUP.md). Để trống ô Magisk APK = tắt
 > (model bị ghi đè, `build_fingerprint` coherent CÓ THỂ lệch model runtime).
 >
@@ -34,6 +36,7 @@
 | **native-bridge** (`libnb.so`, `ro.dalvik.vm.native.bridge`) | Houdini — lớp dịch ARM→x86 của Intel/Google. **Bất kỳ image x86 chạy app ARM đều BẮT BUỘC lộ** | ❌ Không có tool OSS che ở tầng hệ thống. Chỉ Frida hook per-app (dễ bị dò ngược). Muốn hết → **ARM image/redroid-ARM** |
 | **cờ `hypervisor`** trong `/proc/cpuinfo` | Chạy trong VM | ❌ Không có tool OSS strip khỏi nội dung cpuinfo trên x86 |
 | **`ro.product.model` bị MuMu random khi boot** | MuMu ghi đè MUỘN trong boot (sau post-fs-data) | ✅ **resetprop re-apply mỗi boot** (khả thi, ABI-independent) |
+| **`ro.build.characteristics=tablet`** | MuMu báo tablet trong khi profile giả là điện thoại Samsung/Redmi | ✅ **resetprop runtime**: profile có giá trị thật thì set, rỗng thì `--delete` prop để gỡ tell `tablet`; không dùng sed `/system/build.prop` vì VM disposable không reboot |
 | imei / root | MPM áp qua `MuMuManager.exe simulation` trước khi chạy app | ✅ Đã ổn |
 | độ phân giải/DPI runtime | MPM áp qua `custom_resolution`, sau boot gọi thêm `wm size` / `wm density`, và re-assert sau install/restore | ✅ Có mitigation; cần verify B2.1 trên máy thật |
 | android_id | MPM áp/re-apply qua adb trước khi start app, nhưng Android 8+/GMS có thể cấp lại SSAID theo app sau khi cài/chạy TikTok | ⚠️ Known-gap, cần verify sau mỗi phiên |
@@ -51,7 +54,7 @@ Nguồn Android chính: `ANDROID_ID` trên Android 8+ là giá trị scoped theo
   - Nguồn: [Magisk docs](https://topjohnwu.github.io/Magisk/details.html), [resetprop-rs](https://github.com/Enginex0/resetprop-rs)
 - **KHÔNG persistent qua reboot** → phải re-apply **mỗi boot**, ở **cả `post-fs-data` VÀ `late_start service.d`** vì MuMu ghi đè muộn. (MPM inject mỗi lần launch → hợp cơ chế này.)
   - Nguồn: [MagiskHidePropsConf README](https://github.com/Magisk-Modules-Repo/MagiskHidePropsConf)
-- **Đồng bộ trọn bộ**: `ro.product.model/brand/manufacturer/device/name`, `ro.build.fingerprint`, `ro.build.version.security_patch` — phải khớp nhau (nhất quán nội bộ).
+- **Đồng bộ trọn bộ**: `ro.product.model/brand/manufacturer/device/name`, `ro.build.fingerprint`, `ro.build.characteristics` (nếu có nguồn thật; rỗng = xóa tell `tablet`), `ro.build.version.security_patch` — phải khớp nhau (nhất quán nội bộ).
 - **Dùng thiết bị THẬT ĐỜI CŨ**, KHÔNG dùng Pixel mới/beta (bị gate qua hardware attestation). Mẫu coherent: **Samsung Galaxy Note FE** — `SM-N935F` / brand `samsung` / device `gracerlte` / hardware `samsungexynos8890` / fingerprint `samsung/gracerltexx/gracerlte:8.0.0/R16NW/N935FXXS4BRK2:user/release-keys`.
   - Nguồn: [Anti-EmuDetector](https://github.com/u0pattern/Anti-EmuDetector), [PlayIntegrityFork](https://github.com/osm0sis/PlayIntegrityFork)
 

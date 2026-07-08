@@ -1,11 +1,12 @@
 import { create } from 'zustand';
-import type { AccountProfile, ProfileView } from '@/types/instance';
+import type { AccountProfile, ProfileView, RunProfileResult } from '@/types/instance';
 import { getBackend } from '@/lib';
 import { useSettingsStore } from '@/store/useSettingsStore';
 import { toast } from '@/store/useToastStore';
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error';
 const DEFAULT_POLL_INTERVAL_MS = 5000;
+let refreshRequestId = 0;
 
 function profilePollIntervalMs(): number {
   const ms = useSettingsStore.getState().settings?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
@@ -29,7 +30,7 @@ interface ProfileState {
     note: string,
     country: string | null,
   ) => Promise<void>;
-  run: (username: string) => Promise<number>;
+  run: (username: string) => Promise<RunProfileResult>;
   stop: (username: string) => Promise<void>;
   remove: (username: string) => Promise<void>;
 }
@@ -76,12 +77,22 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
   },
 
   async refresh() {
+    const requestId = ++refreshRequestId;
+    const hadProfiles = get().profiles.length > 0;
     try {
-      set({ loadState: get().profiles.length ? 'ready' : 'loading' });
+      set({ loadState: hadProfiles ? 'ready' : 'loading' });
       const profiles = await getBackend().listProfiles();
+      if (requestId !== refreshRequestId) return;
       set({ profiles, loadState: 'ready', error: null });
     } catch (e) {
-      set({ loadState: 'error', error: e instanceof Error ? e.message : String(e) });
+      if (requestId !== refreshRequestId) return;
+      const message = e instanceof Error ? e.message : String(e);
+      if (hadProfiles) {
+        set({ loadState: 'ready', error: message });
+        toast.error(`Cập nhật danh sách lỗi: ${message}`);
+      } else {
+        set({ loadState: 'error', error: message });
+      }
     }
   },
 
@@ -98,9 +109,9 @@ export const useProfileStore = create<ProfileState>((set, get) => ({
     await get().refresh();
   },
   async run(username) {
-    const vm = await getBackend().runProfile(username);
+    const result = await getBackend().runProfile(username);
     await get().refresh();
-    return vm;
+    return result;
   },
   async stop(username) {
     await getBackend().stopProfile(username);

@@ -10,11 +10,47 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use rusqlite::{params, Connection};
+use rusqlite::types::Type;
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::crypto::{self, Key32};
 use crate::model::{AccountProfile, HardwareProfile, Profile, SnapshotMeta, SnapshotRecord};
 use crate::state::InstanceMeta;
+
+fn data_error(message: impl Into<String>) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            message.into(),
+        )),
+    )
+}
+
+fn decrypt_json(raw: String, key: Option<Key32>) -> rusqlite::Result<String> {
+    match raw.strip_prefix("enc:") {
+        Some(hex) => {
+            let Some(k) = key.as_ref() else {
+                return Err(data_error(
+                    "credential da ma hoa nhung khong co khoa giai ma",
+                ));
+            };
+            crypto::decrypt_from_hex(k, hex).map_err(|e| data_error(e.to_string()))
+        }
+        None => Ok(raw),
+    }
+}
+
+fn encode_account_json(account: &AccountProfile, key: Option<Key32>) -> rusqlite::Result<String> {
+    let json = serde_json::to_string(account).map_err(|e| data_error(e.to_string()))?;
+    match key.as_ref() {
+        Some(k) => crypto::encrypt_to_hex(k, &json)
+            .map(|hex| format!("enc:{hex}"))
+            .map_err(|e| data_error(e.to_string())),
+        None => Ok(json),
+    }
+}
 
 pub struct Db {
     conn: Mutex<Connection>,
@@ -85,17 +121,20 @@ impl Db {
             let account_json: Option<String> = row.get(4)?;
             let hardware_json: Option<String> = row.get(5)?;
             // Giải mã account_json nếu có tiền tố "enc:" (back-compat với bản plaintext cũ).
-            let account = account_json.and_then(|s| {
-                let json = match s.strip_prefix("enc:") {
-                    Some(hex) => key
-                        .as_ref()
-                        .and_then(|k| crypto::decrypt_from_hex(k, hex).ok()),
-                    None => Some(s),
-                };
-                json.and_then(|j| serde_json::from_str::<AccountProfile>(&j).ok())
-            });
-            let hardware =
-                hardware_json.and_then(|s| serde_json::from_str::<HardwareProfile>(&s).ok());
+            let account = match account_json {
+                Some(s) => Some(
+                    serde_json::from_str::<AccountProfile>(&decrypt_json(s, key)?)
+                        .map_err(|e| data_error(e.to_string()))?,
+                ),
+                None => None,
+            };
+            let hardware = match hardware_json {
+                Some(s) => Some(
+                    serde_json::from_str::<HardwareProfile>(&s)
+                        .map_err(|e| data_error(e.to_string()))?,
+                ),
+                None => None,
+            };
             Ok((
                 index,
                 InstanceMeta {
@@ -122,17 +161,13 @@ impl Db {
         let account_json = meta
             .account
             .as_ref()
-            .and_then(|a| serde_json::to_string(a).ok())
-            .map(|json| match self.enc_key.as_ref() {
-                Some(k) => crypto::encrypt_to_hex(k, &json)
-                    .map(|hex| format!("enc:{hex}"))
-                    .unwrap_or(json),
-                None => json,
-            });
+            .map(|a| encode_account_json(a, self.enc_key))
+            .transpose()?;
         let hardware_json = meta
             .hardware
             .as_ref()
-            .and_then(|h| serde_json::to_string(h).ok());
+            .map(|h| serde_json::to_string(h).map_err(|e| data_error(e.to_string())))
+            .transpose()?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO instance_meta (vm_index, note, country, last_launched_at, account_json, hardware_json)
@@ -168,16 +203,9 @@ impl Db {
 
     /// Ghi/cập nhật một profile (account mã hóa như instance_meta).
     pub fn upsert_profile(&self, p: &Profile) -> rusqlite::Result<()> {
-        let account_json = serde_json::to_string(&p.account)
-            .ok()
-            .map(|json| match self.enc_key.as_ref() {
-                Some(k) => crypto::encrypt_to_hex(k, &json)
-                    .map(|hex| format!("enc:{hex}"))
-                    .unwrap_or(json),
-                None => json,
-            })
-            .unwrap_or_default();
-        let hardware_json = serde_json::to_string(&p.hardware).unwrap_or_default();
+        let account_json = encode_account_json(&p.account, self.enc_key)?;
+        let hardware_json =
+            serde_json::to_string(&p.hardware).map_err(|e| data_error(e.to_string()))?;
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO profiles (username, account_json, hardware_json, country, note, created_at, last_run_at)
@@ -216,15 +244,10 @@ impl Db {
             let note: String = row.get(4)?;
             let created_at: i64 = row.get(5)?;
             let last_run_at: Option<i64> = row.get(6)?;
-            let account_str = match account_json.strip_prefix("enc:") {
-                Some(hex) => key
-                    .as_ref()
-                    .and_then(|k| crypto::decrypt_from_hex(k, hex).ok())
-                    .unwrap_or_default(),
-                None => account_json,
-            };
-            let account = serde_json::from_str::<AccountProfile>(&account_str).ok();
-            let hardware = serde_json::from_str::<HardwareProfile>(&hardware_json).ok();
+            let account = serde_json::from_str::<AccountProfile>(&decrypt_json(account_json, key)?)
+                .map_err(|e| data_error(e.to_string()))?;
+            let hardware = serde_json::from_str::<HardwareProfile>(&hardware_json)
+                .map_err(|e| data_error(e.to_string()))?;
             Ok((
                 username,
                 account,
@@ -238,17 +261,15 @@ impl Db {
         let mut out = Vec::new();
         for r in rows {
             let (username, account, hardware, country, note, created_at, last_run_at) = r?;
-            if let (Some(account), Some(hardware)) = (account, hardware) {
-                out.push(Profile {
-                    username,
-                    account,
-                    hardware,
-                    country,
-                    note,
-                    created_at,
-                    last_run_at,
-                });
-            }
+            out.push(Profile {
+                username,
+                account,
+                hardware,
+                country,
+                note,
+                created_at,
+                last_run_at,
+            });
         }
         Ok(out)
     }
@@ -256,6 +277,26 @@ impl Db {
     pub fn delete_profile(&self, username: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM profiles WHERE username=?1", params![username])?;
+        Ok(())
+    }
+
+    pub fn snapshot_keys(&self, account_key: &str) -> rusqlite::Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT storage_key FROM snapshots WHERE account_key=?1 ORDER BY created_at DESC, id DESC",
+        )?;
+        let keys = stmt
+            .query_map(params![account_key], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(keys)
+    }
+
+    pub fn delete_snapshot_key(&self, storage_key: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM snapshots WHERE storage_key=?1",
+            params![storage_key],
+        )?;
         Ok(())
     }
 
@@ -290,13 +331,6 @@ impl Db {
         rows.collect()
     }
 
-    /// Xóa sạch bảng running (sau khi reconcile xong lúc khởi động).
-    pub fn clear_running(&self) -> rusqlite::Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM running_vms", [])?;
-        Ok(())
-    }
-
     /// Ghi một snapshot mới cho `account_key` và đặt nó thành bản mới nhất.
     pub fn record_snapshot(
         &self,
@@ -307,6 +341,17 @@ impl Db {
     ) -> rusqlite::Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let max_created = tx
+            .query_row(
+                "SELECT MAX(created_at) FROM snapshots WHERE account_key=?1",
+                params![account_key],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten();
+        let effective_created_at = max_created
+            .map(|max| created_at.max(max.saturating_add(1)))
+            .unwrap_or(created_at);
         tx.execute(
             "UPDATE snapshots SET is_latest=0 WHERE account_key=?1",
             params![account_key],
@@ -321,7 +366,7 @@ impl Db {
                 meta.sha256,
                 meta.size_bytes,
                 meta.apk_version,
-                created_at
+                effective_created_at
             ],
         )?;
         tx.commit()?;
@@ -333,7 +378,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT storage_key FROM snapshots WHERE account_key=?1
-             ORDER BY created_at DESC LIMIT -1 OFFSET ?2",
+             ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?2",
         )?;
         let keys = stmt
             .query_map(params![account_key, keep], |row| row.get::<_, String>(0))?
@@ -342,11 +387,12 @@ impl Db {
     }
 
     /// Xóa bản ghi snapshot cũ, chỉ giữ `keep` bản mới nhất cho `account_key`.
+    #[cfg(test)]
     pub fn prune_snapshots(&self, account_key: &str, keep: u32) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "DELETE FROM snapshots WHERE account_key=?1 AND id NOT IN (
-                SELECT id FROM snapshots WHERE account_key=?1 ORDER BY created_at DESC LIMIT ?2
+                SELECT id FROM snapshots WHERE account_key=?1 ORDER BY created_at DESC, id DESC LIMIT ?2
              )",
             params![account_key, keep],
         )?;
@@ -358,7 +404,7 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT storage_key, sha256, size_bytes, apk_version, created_at
-             FROM snapshots WHERE account_key=?1 AND is_latest=1 LIMIT 1",
+             FROM snapshots WHERE account_key=?1 ORDER BY created_at DESC, id DESC LIMIT 1",
         )?;
         let mut rows = stmt.query(params![account_key])?;
         if let Some(row) = rows.next()? {
@@ -398,6 +444,11 @@ mod tests {
                 device: "o1s".into(),
                 build_fingerprint:
                     "samsung/o1sxx/o1s:12/SP1A.210812.016/G991BXXU5CVF2:user/release-keys".into(),
+                soc_hardware: "".into(),
+                board_platform: "".into(),
+                gpu_egl: "mali".into(),
+                security_patch: "2022-07-01".into(),
+                build_characteristics: "".into(),
             }),
         }
     }

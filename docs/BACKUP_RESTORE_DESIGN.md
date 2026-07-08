@@ -127,7 +127,7 @@ pub trait AdbWorker: Send + Sync {
 | **Nén zstd** (level 6 hiện tại) | Tỉ lệ nén tốt + độ trễ hợp lý khi Dừng profile | Level 19 cho dung lượng tốt hơn rất ít nhưng chậm mạnh trên fixture 16 MiB |
 | **Dedup theo nội dung (content-addressed)** | Nhiều snapshot chung file → chỉ lưu 1 lần | Chưa có trong code hiện tại; hiện retention giữ N snapshot/profile |
 | **Delta/incremental** | Chỉ lưu phần thay đổi so với snapshot trước | Cân nhắc; full-snapshot-đã-prune thường chỉ vài–vài chục MB nên có thể để sau |
-| **Versioning + retention** | Giữ N snapshot/tài khoản để rollback | Đánh dấu `is_latest`; xóa cũ theo chính sách |
+| **Versioning + retention** | Giữ N snapshot/tài khoản để rollback | Xếp theo `created_at DESC, id DESC`; timestamp mới được ép monotonic theo account; xóa row sau khi blob cũ xóa thành công |
 
 **Khuyến nghị v1:** full-snapshot đã prune + nén zstd level cân bằng + retention. Dedup/blob-store và delta để Giai đoạn sau (phức tạp/độ lợi biên thấp khi data đã nhỏ).
 
@@ -153,9 +153,9 @@ tương lai, chưa có trong code hiện tại.
 
 ## 7. TOÀN VẸN & AN TOÀN
 
-- **Checksum sha256** cho mỗi archive; verify **sau khi tải về, trước khi restore**.
+- **Checksum sha256** cho mỗi archive; verify **sau khi tải về, trước khi restore**, gồm cả bước giải mã + giải nén thử.
 - **Nguyên tử phía server:** upload lên key tạm rồi đổi `is_latest` sau khi hoàn tất (không ghi đè bản tốt bằng bản hỏng).
-- SQLite ghi `running_vms` để reconcile sau crash; **không hủy VM** khi chưa ghi snapshot thành công.
+- SQLite ghi `running_vms` ngay khi provision xác định được VM mới để reconcile sau crash; **không hủy VM** khi chưa ghi snapshot thành công.
 - **Kiểm tra rỗng/không hợp lệ**: từ chối archive quá nhỏ/không giải nén được.
 - **Khớp APK version**: code hiện từ chối restore nếu `apk_version` snapshot lệch version đang cài trong VM (trừ snapshot cũ `unknown`).
 

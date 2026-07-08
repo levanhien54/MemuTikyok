@@ -67,6 +67,11 @@ fn hw() -> HardwareProfile {
         device: "frd".into(),
         build_fingerprint: "HUAWEI/FRD-L19/HWFRD:8.0.0/HUAWEIFRD-L19/380C431:user/release-keys"
             .into(),
+        soc_hardware: "kirin950".into(),
+        board_platform: "hi3650".into(),
+        gpu_egl: "mali".into(),
+        security_patch: "2018-01-01".into(),
+        build_characteristics: "".into(),
     }
 }
 
@@ -398,7 +403,8 @@ async fn a4_provision_fingerprint_inject() {
     let guard = VmGuard::new(mp.clone());
 
     let before = index_set(&state).await;
-    let idx = orchestrator::provision(&state, "acc_fp", &hw(), None)
+    let hw = hw();
+    let idx = orchestrator::provision(&state, "acc_fp", &hw, None)
         .await
         .expect("provision");
     guard.track(idx);
@@ -449,6 +455,24 @@ async fn a4_provision_fingerprint_inject() {
     }
 
     // MAC chỉ ở mức simulation (đọc lại adb không tin cậy).
+    let characteristics = getprop(&mp, idx, "ro.build.characteristics");
+    assert!(
+        !characteristics.contains("tablet"),
+        "ro.build.characteristics van la tablet: {characteristics}"
+    );
+    if !hw.gpu_egl.is_empty() {
+        let egl = getprop(&mp, idx, "ro.hardware.egl");
+        assert_eq!(egl.trim(), hw.gpu_egl, "ro.hardware.egl lech profile");
+    }
+    if !hw.security_patch.is_empty() {
+        let patch = getprop(&mp, idx, "ro.build.version.security_patch");
+        assert_eq!(
+            patch.trim(),
+            hw.security_patch,
+            "security_patch lech profile"
+        );
+    }
+
     let mac_cfg = simulation(&mp, idx, "mac_address");
     eprintln!("[info] mac_address simulation = {mac_cfg:?}");
 
@@ -1348,7 +1372,8 @@ async fn a12_profile_lifecycle_real() {
     // 2) run: provision VM + cài TikTok + đăng ký running.
     let idx = crate::profile_ops::run(&state, "acc_prof")
         .await
-        .expect("run profile");
+        .expect("run profile")
+        .vm_index;
     guard.track(idx);
     assert_new_index(&before, idx);
     assert_eq!(
@@ -1402,7 +1427,8 @@ async fn a12_profile_lifecycle_real() {
     // 3) run lần 2 khi đang chạy → idempotent, KHÔNG tạo VM mới.
     let idx_again = crate::profile_ops::run(&state, "acc_prof")
         .await
-        .expect("run lần 2");
+        .expect("run lần 2")
+        .vm_index;
     assert_eq!(idx_again, idx, "run khi đang chạy trả VM hiện tại");
     // Chỉ xét index MỚI so với `before` (không đếm tổng toàn cục — bền với VM có sẵn).
     let new_indices: Vec<u32> = {
@@ -1493,7 +1519,8 @@ async fn a13_du_lieu_tiktok_song_qua_stop_run_va_khoi_dong_lai() {
         .expect("create");
     let idx1 = crate::profile_ops::run(&state, "acc_data")
         .await
-        .expect("run 1");
+        .expect("run 1")
+        .vm_index;
     guard.track(idx1);
     assert_new_index(&before, idx1);
 
@@ -1556,7 +1583,8 @@ async fn a13_du_lieu_tiktok_song_qua_stop_run_va_khoi_dong_lai() {
     // run LẦN 2 trên state MỚI → provision VM mới: cài TikTok RỒI restore snapshot.
     let idx2 = crate::profile_ops::run(&state2, "acc_data")
         .await
-        .expect("run 2 sau khởi động lại");
+        .expect("run 2 sau khởi động lại")
+        .vm_index;
     guard.track(idx2);
     // idx2 CÓ THỂ == idx1: emulator tái dùng index vừa giải phóng — đúng mô hình disposable
     // (VM cũ đã `remove`, VM mới là instance MỚI dù trùng số → disk sạch, không có marker

@@ -7,6 +7,7 @@
 //! - **Trừu tượng**: local (thư mục) ⇄ server (S3) không đổi call-site.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -21,6 +22,7 @@ use crate::error::AppResult;
 /// Level 19 cho tỉ lệ tốt hơn rất ít trên fixture phiên TikTok nhưng chậm mạnh
 /// (đo 16 MiB mất ~21s). Level 6 giữ dung lượng gần tương đương và giảm độ trễ.
 const ZSTD_LEVEL: i32 = 6;
+const MAX_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Metadata của blob ĐÃ LƯU (sau nén) — dùng để verify toàn vẹn & thống kê dung lượng.
 #[derive(Debug, Clone)]
@@ -69,6 +71,7 @@ impl LocalSnapshotStore {
     pub fn new(root: impl Into<PathBuf>, cipher_key: Option<Key32>) -> AppResult<Self> {
         let root = root.into();
         fs::create_dir_all(&root)?;
+        sweep_tmp_files(&root)?;
         Ok(Self {
             root,
             cipher_key,
@@ -88,6 +91,42 @@ impl LocalSnapshotStore {
         }
         p
     }
+
+    fn decode_blob(&self, blob: Vec<u8>) -> AppResult<Vec<u8>> {
+        let compressed = match &self.cipher_key {
+            Some(k) => crypto::decrypt(k, &blob)?,
+            None => blob,
+        };
+        let decoder = zstd::stream::read::Decoder::new(&compressed[..])
+            .map_err(|e| crate::error::AppError::Io(e.to_string()))?;
+        let mut limited = decoder.take(MAX_DECOMPRESSED_BYTES + 1);
+        let mut plain = Vec::new();
+        limited
+            .read_to_end(&mut plain)
+            .map_err(|e| crate::error::AppError::Io(e.to_string()))?;
+        if plain.len() as u64 > MAX_DECOMPRESSED_BYTES {
+            return Err(crate::error::AppError::Io(format!(
+                "snapshot giai nen vuot qua gioi han {} bytes",
+                MAX_DECOMPRESSED_BYTES
+            )));
+        }
+        Ok(plain)
+    }
+}
+
+fn sweep_tmp_files(dir: &Path) -> AppResult<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            sweep_tmp_files(&path)?;
+        } else if path.extension().is_some_and(|ext| ext == "tmp") {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -111,13 +150,22 @@ impl SnapshotStore for LocalSnapshotStore {
         let seq = self.tmp_seq.fetch_add(1, Ordering::Relaxed);
         let fname = dst.file_name().and_then(|s| s.to_str()).unwrap_or("snap");
         let tmp = dst.with_file_name(format!("{fname}.{}.{seq}.tmp", std::process::id()));
-        if let Err(e) = fs::write(&tmp, &blob) {
+        let write_res = (|| -> std::io::Result<()> {
+            let mut f = fs::File::create(&tmp)?;
+            f.write_all(&blob)?;
+            f.sync_all()?;
+            Ok(())
+        })();
+        if let Err(e) = write_res {
             let _ = fs::remove_file(&tmp);
             return Err(e.into());
         }
         if let Err(e) = fs::rename(&tmp, &dst) {
             let _ = fs::remove_file(&tmp);
             return Err(e.into());
+        }
+        if let Some(parent) = dst.parent() {
+            let _ = fs::File::open(parent).and_then(|dir| dir.sync_all());
         }
 
         Ok(StoredMeta {
@@ -128,12 +176,7 @@ impl SnapshotStore for LocalSnapshotStore {
 
     async fn get(&self, key: &str, dst: &Path) -> AppResult<()> {
         let blob = fs::read(self.key_path(key))?;
-        let compressed = match &self.cipher_key {
-            Some(k) => crypto::decrypt(k, &blob)?,
-            None => blob,
-        };
-        let plain = zstd::decode_all(&compressed[..])
-            .map_err(|e| crate::error::AppError::Io(e.to_string()))?;
+        let plain = self.decode_blob(blob)?;
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -146,7 +189,17 @@ impl SnapshotStore for LocalSnapshotStore {
         if !path.exists() {
             return Ok(false);
         }
-        Ok(sha256_file(&path)? == sha256)
+        let blob = fs::read(&path)?;
+        if sha256_bytes(&blob) != sha256 {
+            return Ok(false);
+        }
+        match self.decode_blob(blob) {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                tracing::warn!(key, error = %e, "snapshot checksum dung nhung khong giai ma/giai nen duoc");
+                Ok(false)
+            }
+        }
     }
 
     async fn delete(&self, key: &str) -> AppResult<()> {
